@@ -1,7 +1,7 @@
 [project]
-name = "on-my-plate"
+name = "pl8-base"
 version = "0.0.1"
-description = "On My Plate, a lightweight issue tracker backed by DynamoDB"
+description = "PL8, a lightweight issue tracker backed by DynamoDB"
 readme = "README.md"
 authors = [
     { name = "Daniel Chen", email = "danieljnchen@gmail.com" }
