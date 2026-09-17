@@ -8,7 +8,7 @@ CLASS_MAP = {
 }
 
 __all__ = [
-    IssueStatus,
+    "IssueStatus",
     "CLASS_MAP",
     *CLASS_MAP.keys(),
 ]

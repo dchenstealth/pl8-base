@@ -40,16 +40,22 @@ def gen_issue_id(*, issue_id_len=6, alphabet=None):
     Defaults to [a-zA-Z0-9]
 
     Args:
-        len (int): id length
+        issue_id_len (int): id length
         alphabet (sequence): allowed characters
 
     Returns:
-        token bytes
+        str: generated issue id
+
+    Raises:
+        DDBArgsError: if issue_id_len is out of bounds
     """
     if issue_id_len < MIN_ISSUE_ID_LEN:
         raise DDBArgsError("Issue ID too short")
     elif issue_id_len > MAX_ISSUE_ID_LEN:
         raise DDBArgsError("Issue ID too long")
+
+    if alphabet is None:
+        alphabet = DEFAULT_ID_ALPHABET
 
     return "".join(secrets.choice(alphabet) for _ in range(issue_id_len))
 

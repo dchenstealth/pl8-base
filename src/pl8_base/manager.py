@@ -5,13 +5,15 @@ from .mixins import IssueMixin
 from .types import CLASS_MAP
 
 
-class OMPDDB(IssueMixin):
+class PL8DDB(IssueMixin):
     def __init__(self, *, dynamodb_client, table_name, logger):
         """Init manager.
         Args:
             dynamodb_client (boto3.dynamodb): DynamoDB client
             table_name (str): DynamoDB table name to use
-            logger: (logging.Logger or compatible logger class)
+            logger (aws_lambda_powertools.Logger): injected structured
+                logger. Extra keyword args are merged into the emitted
+                JSON log record.
         """
         self.dynamodb_client = dynamodb_client
         self.table_name = table_name
@@ -57,7 +59,7 @@ class OMPDDB(IssueMixin):
         if type_class is None:
             self.logger.error("Retrieved item with unknown type",
                               item_type=item_type, item=item)
-            raise DDBCorruptedError("Malformed item without type")
+            raise DDBCorruptedError(f"Item with unknown type: {item_type}")
 
         try:
             parsed = type_class.from_item(item, td=self.td)

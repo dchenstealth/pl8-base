@@ -1,5 +1,4 @@
-
-from ..const import RETRY_ISSUE_ID_COLLISIONS 
+from ..const import RETRY_ISSUE_ID_COLLISIONS
 from ..errors import DDBIdCollisionError
 from ..types import IssueInfo
 from ..util import gen_issue_id
@@ -9,8 +8,6 @@ class IssueMixin:
     def create_issue(self, *, space_id, assignee, title,
                      description, status):
         """Create an Issue.
-
-        Does not create Issue
 
         Args:
             space_id (str): id of the issue's space
@@ -32,6 +29,7 @@ class IssueMixin:
                 issue_id=issue_id,
                 assignee=assignee,
                 title=title,
+                description=description,
                 status=status,
             )
             # TODO dynamodb PutItem, conditioned. Return on success,
@@ -52,12 +50,17 @@ class IssueMixin:
         raise NotImplementedError()
 
     def get_issue_blockers(self, *, space_id, blocked_issue_id, is_blocking_issue_done=None, limit=50, cursor=None):
+        # Issues that block this Issue: Query GSI1 on
+        # GSI1PK=BLOCKEDISSUE#{space_id}#{blocked_issue_id}
         # Return one page of IssueBlockers + continuation cursor
         # If is_blocking_issue_done is set, filter
         # cursor uses util methods to encode/decode
         raise NotImplementedError()
 
-    def get_issue_blocking(self, *, space_id, blocked_issue_id, is_blocking_issue_done=None, limit=50, cursor=None):
+    def get_issue_blocking(self, *, space_id, blocking_issue_id, is_blocking_issue_done=None, limit=50, cursor=None):
+        # Issues blocked by this Issue: Query the primary table on
+        # PK=ISSUE#{space_id}#{blocking_issue_id} with
+        # begins_with(SK, "800#BLOCKEDISSUE#")
         # Return one page of IssueBlockers + continuation cursor
         # If is_blocking_issue_done is set, filter
         # cursor uses util methods to encode/decode

@@ -13,8 +13,13 @@ class DDBCorruptedError(DDBInternalError):
     pass
 
 
+class DDBMissingError(DDBError):
+    """Raised when a requested item does not exist"""
+    pass
+
+
 class DDBExistsError(DDBError):
-    """Raised on invalid arguments passed in"""
+    """Raised when an item already exists"""
     pass
 
 

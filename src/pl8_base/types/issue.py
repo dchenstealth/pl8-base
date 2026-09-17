@@ -63,7 +63,7 @@ class IssueBlocker(BaseObject):
         "GSI1PK": "BLOCKEDISSUE#{blocked_issue_space_id}#{blocked_issue_id}",
         "GSI1SK": "500#BLOCKINGISSUE#{blocking_issue_space_id}#{blocking_issue_id}",
     })
-    COMPRESSED_ATTRS: ClassVar[set[str]] = {}
+    COMPRESSED_ATTRS: ClassVar[set[str]] = set()
 
     PK: str = None
     SK: str = None
