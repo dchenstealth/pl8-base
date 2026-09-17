@@ -3,6 +3,19 @@ revision = 3
 requires-python = ">=3.14"
 
 [[package]]
+name = "aws-lambda-powertools"
+version = "3.35.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jmespath" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a9/5b/9b36aa010e686bbe0a8bfb7367430994254a68d1e8c2383af7b3264c6ebb/aws_lambda_powertools-3.35.0.tar.gz", hash = "sha256:27c1c7d7920f214a68a11505dca33ce3709a38c4b79f5fbc94141ec0af92c9f8", size = 803046, upload-time = "2026-09-15T12:18:56.22Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c7/6e/2a2764dd3fef758e8bde3ec5c0fb6e2ceeace2a873ca5def30b6c69a7bcf/aws_lambda_powertools-3.35.0-py3-none-any.whl", hash = "sha256:e8fbc27d74272fb99cbec67305250e825d1630dceb2dbfdcf5908dc9c4c82dcf", size = 960326, upload-time = "2026-09-15T12:18:54.031Z" },
+]
+
+[[package]]
 name = "boto3"
 version = "1.43.93"
 source = { registry = "https://pypi.org/simple" }
@@ -351,7 +364,16 @@ wheels = [
 ]
 
 [[package]]
-name = "on-my-plate"
+name = "packaging"
+version = "26.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/fa/3944b40b07da9ce895c0e6303a5ab7d53da063554f534556b134a54d6093/packaging-26.3.tar.gz", hash = "sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79", size = 313412, upload-time = "2026-08-04T18:15:28.737Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c", size = 129956, upload-time = "2026-08-04T18:15:27.159Z" },
+]
+
+[[package]]
+name = "pl8-base"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [
@@ -361,6 +383,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "aws-lambda-powertools" },
     { name = "moto" },
     { name = "pytest" },
     { name = "ruff" },
@@ -374,18 +397,10 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "aws-lambda-powertools", specifier = "~=3.35.0" },
     { name = "moto", specifier = "~=5.2.2" },
     { name = "pytest", specifier = "~=9.1.1" },
     { name = "ruff", specifier = "~=0.15.20" },
-]
-
-[[package]]
-name = "packaging"
-version = "26.3"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/7d/fa/3944b40b07da9ce895c0e6303a5ab7d53da063554f534556b134a54d6093/packaging-26.3.tar.gz", hash = "sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79", size = 313412, upload-time = "2026-08-04T18:15:28.737Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c", size = 129956, upload-time = "2026-08-04T18:15:27.159Z" },
 ]
 
 [[package]]
@@ -542,6 +557,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "typing-extensions"
+version = "4.16.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/cc/6253133b5bb138fc3306cebfbda2c520f545d36b5be2c7255cc528bb45d6/typing_extensions-4.16.0.tar.gz", hash = "sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5", size = 113555, upload-time = "2026-07-02T08:40:05.92Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl", hash = "sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8", size = 45571, upload-time = "2026-07-02T08:40:04.659Z" },
 ]
 
 [[package]]
