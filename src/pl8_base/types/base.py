@@ -9,9 +9,6 @@ from ..errors import DDBArgsError
 from ..util import cleanup_decimals, isotime
 
 
-COMPRESSED_KEY = "compressed"
-
-
 class BaseObjectMeta(msgspec.StructMeta, abc.ABCMeta):
     def __new__(mcls, name, bases, namespace, **struct_config):
         struct_config.setdefault("kw_only", True)
