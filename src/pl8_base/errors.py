@@ -34,5 +34,18 @@ class DDBIdCollisionError(DDBError):
 
 
 class DDBTransactionConflictError(DDBError):
-    """Raised on transaction conflict"""
+    """Raised on transaction conflict.
+
+    Transient contention. The same request may be retried unchanged; see
+    util.retry_on_transaction_conflict.
+    """
+    pass
+
+
+class DDBVersionConflictError(DDBError):
+    """Raised when a write's version condition fails.
+
+    The caller's view of the item is stale, so retrying the same request will
+    fail again. The caller must re-read and reapply its change.
+    """
     pass

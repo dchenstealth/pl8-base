@@ -1,13 +1,22 @@
 import base64
+import functools
 import json
+import random
 import string
 import secrets
+import time
 
 from decimal import Decimal
 from datetime import datetime, UTC
 
-from .const import MAX_ISSUE_ID_LEN, MIN_ISSUE_ID_LEN
-from .errors import DDBArgsError
+from .const import (
+    MAX_ISSUE_ID_LEN,
+    MIN_ISSUE_ID_LEN,
+    TRANSACT_RETRY_ATTEMPTS,
+    TRANSACT_RETRY_BASE_DELAY,
+    TRANSACT_RETRY_MAX_DELAY,
+)
+from .errors import DDBArgsError, DDBTransactionConflictError
 
 
 # Defaults to [a-zA-Z0-9]
@@ -92,3 +101,52 @@ def decode_pagination_cursor(cursor):
     """
     json_bytes = base64.urlsafe_b64decode(cursor)
     return json.loads(json_bytes.decode())
+
+
+def retry_on_transaction_conflict(*, attempts=TRANSACT_RETRY_ATTEMPTS,
+                                  base_delay=TRANSACT_RETRY_BASE_DELAY,
+                                  max_delay=TRANSACT_RETRY_MAX_DELAY):
+    """
+    Retry the decorated call on DDBTransactionConflictError.
+
+    Uses full-jitter exponential backoff: attempt n sleeps a uniform random
+    interval in [0, min(max_delay, base_delay * 2**n)). Drawing across the
+    whole interval rather than jittering around a fixed backoff is what keeps
+    conflicting writers from re-colliding in lockstep.
+
+    Only DDBTransactionConflictError is retried. DDBVersionConflictError is
+    deliberately not: it means the caller's view of the item is stale, so the
+    same request would keep failing until the caller re-reads.
+
+    Args:
+        attempts (int): total tries, including the first
+        base_delay (float): seconds, the exponential's starting point
+        max_delay (float): seconds, cap on the interval drawn from
+
+    Returns:
+        callable: decorator
+
+    Raises:
+        DDBArgsError: if attempts < 1
+        DDBTransactionConflictError: if every attempt conflicts
+    """
+    if attempts < 1:
+        raise DDBArgsError("attempts must be at least 1")
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(attempts):
+                try:
+                    return func(*args, **kwargs)
+                except DDBTransactionConflictError:
+                    if attempt == attempts - 1:
+                        raise
+
+                    # Jitter is not security sensitive, so random not secrets
+                    interval = min(max_delay, base_delay * (2 ** attempt))
+                    time.sleep(random.uniform(0, interval))
+
+        return wrapper
+
+    return decorator

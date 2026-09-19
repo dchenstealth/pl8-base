@@ -75,10 +75,45 @@ class PL8DDB(IssueMixin):
         pass
 
     def _build_update(self, *, version=None, expected_vals=None, **attrs):
+        """Build an update dict for update_item or transact_write_items.
+
+        Every write bumps version and sets updated_at. The version *condition*
+        is opt-in, applied only when the caller passes version=.
+
+        Consumer-facing operations pass version= to fence a caller whose view of
+        the item is stale, and get DDBVersionConflictError back if it moved.
+        Nearly every background write to an Issue is semantically meaningful to a
+        consumer (num_active_blockers, or the status flip that follows it), so
+        these are not spurious conflicts.
+
+        The handle_* event consumers MUST NOT pass version=. They hold no
+        consumer's read, and their correctness comes from domain conditions
+        instead (is_blocking_issue_done=False, status=BLOCKED,
+        num_active_blockers=0), which are also what makes them idempotent under
+        at-least-once, unordered delivery. Fencing them on version would make
+        event replays fail spuriously.
+
+        Args:
+            version (int or None): if set, condition the write on this version
+            expected_vals (dict or None): attr values to condition on
+            **attrs: attrs to set
+
+        Returns:
+            dict: update dict for update_item, or to wrap in {"Update": <dict>}
+                for transact_write_items
+
+        Raises:
+            DDBMissingError: if the item does not exist
+            DDBVersionConflictError: if version is set and does not match
+        """
         # TODO build an update dict that can be passed directly to update_item
         # or can be wrapped in {"Update": <dict>} and passed to transact_write_items
-        # should support a version= condition expression for optimistic locking
         # should condition on existence for all operations
         # should support condition checking expected vals
         # Should set version += 1 and updated_at on all operations
+        # Needs ReturnValuesOnConditionCheckFailure=ALL_OLD to tell the failure
+        # cases apart: missing vs stale version vs expected_vals mismatch all
+        # surface as one ConditionalCheckFailedException otherwise. In a
+        # transaction the per-item reasons come back positionally in
+        # CancellationReasons, so item ordering must stay stable.
         pass
