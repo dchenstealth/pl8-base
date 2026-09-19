@@ -18,7 +18,14 @@ from .const import (
     TRANSACT_RETRY_BASE_DELAY,
     TRANSACT_RETRY_MAX_DELAY,
 )
-from .errors import DDBArgsError, DDBTransactionConflictError
+import msgspec
+
+from .errors import (
+    DDBArgsError,
+    DDBTransactionConflictError,
+    EventCorruptedError,
+    EventSendError,
+)
 
 
 # Defaults to [a-zA-Z0-9]
@@ -190,3 +197,72 @@ def retry_on_transaction_conflict(*, attempts=TRANSACT_RETRY_ATTEMPTS,
         return wrapper
 
     return decorator
+
+
+def send_event(*, events_client, event, source, event_bus_name):
+    """Send a single BaseEvent on an EventBridge bus.
+
+    Takes the EventBridge client explicitly rather than depending on a
+    manager instance carrying one, so callers that never send events (e.g.
+    most PL8DDB consumers) never need to configure one.
+
+    Args:
+        events_client (boto3 EventBridge client): client to send with
+        event (BaseEvent): event to send
+        source (str): EventBridge Source field
+        event_bus_name (str): EventBridge bus name to send on
+
+    Returns:
+        dict: put_events response
+
+    Raises:
+        EventSendError: if EventBridge reports a failed entry
+    """
+    entry = event.to_entry(source=source, event_bus_name=event_bus_name)
+    response = events_client.put_events(Entries=[entry])
+
+    if response.get("FailedEntryCount"):
+        failed = response["Entries"][0]
+        raise EventSendError(
+            f"Failed to send event {type(event).__name__} "
+            f"(code: {failed.get('ErrorCode')}): {failed.get('ErrorMessage')}"
+        )
+
+    return response
+
+
+def parse_event(detail):
+    """Parse an EventBridge event Detail dict into a typed BaseEvent.
+
+    Consumers reading off the SQS queue behind the eventbus get the full
+    EventBridge envelope as the SQS record body; this parses the inner
+    "detail" dict, e.g.:
+        parse_event(json.loads(record["body"])["detail"])
+
+    Imports EVENT_CLASS_MAP from .types locally rather than at module level:
+    types/events.py imports isotime from this module, so a top-level import
+    here would be circular.
+
+    Args:
+        detail (dict): the event's "detail" field
+
+    Returns:
+        BaseEvent: parsed event, of the concrete subclass named by detail["type"]
+
+    Raises:
+        EventCorruptedError: if missing/unknown type, or malformed payload
+    """
+    from .types import EVENT_CLASS_MAP
+
+    event_type = detail.get("type")
+    if event_type is None:
+        raise EventCorruptedError("Malformed event without type")
+
+    event_cls = EVENT_CLASS_MAP.get(event_type)
+    if event_cls is None:
+        raise EventCorruptedError(f"Event with unknown type: {event_type}")
+
+    try:
+        return msgspec.convert(detail, event_cls)
+    except Exception as exc:
+        raise EventCorruptedError(f"Malformed event: {str(exc)}")

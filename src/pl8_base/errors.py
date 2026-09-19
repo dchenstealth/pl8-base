@@ -78,3 +78,22 @@ class DDBBlockingIssueDoneError(DDBError):
     satisfied.
     """
     pass
+
+
+class EventError(Exception):
+    """Base class for event issues"""
+    pass
+
+
+class EventSendError(EventError):
+    """Raised when EventBridge rejects or fails to accept an event.
+
+    Covers both a failed put_events call and a per-entry failure reported
+    back with FailedEntryCount > 0.
+    """
+    pass
+
+
+class EventCorruptedError(EventError):
+    """Raised when an event's Detail is missing/unknown type, or malformed"""
+    pass
