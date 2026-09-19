@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """Space CRUD and enumeration.
 
 A Space stores Space metadata and makes every space id enumerable. It holds no

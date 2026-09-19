@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 import msgspec
 
 from boto3.dynamodb.types import TypeSerializer, TypeDeserializer

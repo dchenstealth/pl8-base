@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 import pytest
 
 from botocore.exceptions import ClientError

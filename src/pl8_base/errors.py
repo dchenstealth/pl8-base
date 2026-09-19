@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 class DDBError(Exception):
     """Base class for DDB Issues"""
     pass

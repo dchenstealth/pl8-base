@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 from botocore.exceptions import ClientError
 
 from ..const import GSI1_INDEX_NAME

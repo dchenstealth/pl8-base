@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 from types import MappingProxyType
 from typing import ClassVar
 

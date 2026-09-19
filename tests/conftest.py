@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """Shared fixtures for the pl8-base suite.
 
 Tests arrange their state through the real manager methods rather than writing

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 TRANSACT_WRITE_LIMIT = 100
 BATCH_WRITE_LIMIT = 25
 

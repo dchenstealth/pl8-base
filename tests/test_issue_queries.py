@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 import pytest
 
 from pl8_base.types import IssueStatus

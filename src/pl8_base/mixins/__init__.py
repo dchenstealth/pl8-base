@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 from .issue import IssueMixin
 from .space import SpaceMixin
 

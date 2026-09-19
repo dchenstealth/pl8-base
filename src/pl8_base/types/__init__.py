@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 from .enums import IssueStatus
 from .events import (
     BaseEvent,
