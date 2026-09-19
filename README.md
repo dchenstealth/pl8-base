@@ -23,9 +23,14 @@ uv add pl8-base
 
 ### Basic usage
 
-`BasePL8` wraps a `boto3` DynamoDB client and an
+`BasePL8` wraps a `boto3` DynamoDB client and a structured logger. Error
+logging passes arbitrary keyword args through to be merged into the log
+record (e.g. `self.logger.error(msg, item=item)`), which a stdlib
+`logging.Logger` rejects — pass an
 [`aws-lambda-powertools`](https://docs.powertools.aws.dev/lambda/python/latest/)
-`Logger`. It expects a table already provisioned with `PK`/`SK` and a
+`Logger` instead (`pip install aws-lambda-powertools` — it's not a dependency
+of this package, since only your logger instance needs it, not `pl8-base`
+itself). It also expects a table already provisioned with `PK`/`SK` and a
 `GSI1` global secondary index (`GSI1PK`/`GSI1SK`) — see
 [Deploying](#deploying) below.
 
