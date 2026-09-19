@@ -6,7 +6,13 @@ import pytest
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 
 from pl8_base.errors import DDBArgsError
-from pl8_base.types import CLASS_MAP, IssueBlocker, IssueInfo, IssueStatus
+from pl8_base.types import (
+    CLASS_MAP,
+    IssueBlocker,
+    IssueInfo,
+    IssueStatus,
+    SpaceInfo,
+)
 from pl8_base.types.base import BaseObject
 
 
@@ -42,6 +48,16 @@ def make_blocker(**overrides):
     }
     kwargs.update(overrides)
     return IssueBlocker(**kwargs)
+
+
+def make_space(**overrides):
+    kwargs = {
+        "space_id": "ENG",
+        "name": "Engineering",
+        "description": "test desc",
+    }
+    kwargs.update(overrides)
+    return SpaceInfo(**kwargs)
 
 
 class TestIssueStatus:
@@ -274,6 +290,106 @@ class TestIssueBlockerSerialization:
         }
 
 
+class TestSpaceInfoKeys:
+    def test_renders_exact_keys(self):
+        space = make_space()
+
+        assert space.PK == "SPACE#ENG"
+        assert space.SK == "100#INFO"
+        assert space.GSI1PK == "SPACES"
+        assert space.GSI1SK == "SPACE#ENG"
+
+    def test_gsi1pk_is_a_constant_bucket(self):
+        # Enumeration reads one GSI partition, so GSI1PK must not vary with the
+        # space. This is the property get_spaces depends on.
+        assert make_space(space_id="ENG").GSI1PK == make_space(
+            space_id="OPS").GSI1PK == "SPACES"
+
+    def test_gsi1sk_is_distinct_per_space(self):
+        # Cursor-based pagination cannot work with duplicate sort keys.
+        assert make_space(space_id="ENG").GSI1SK != make_space(
+            space_id="OPS").GSI1SK
+
+    def test_gsi1sk_sorts_alphabetically(self):
+        assert make_space(space_id="ALPHA").GSI1SK < make_space(
+            space_id="MID").GSI1SK < make_space(space_id="ZED").GSI1SK
+
+    def test_pk_does_not_collide_with_an_issue_partition(self):
+        # An Issue in space ENG and the Space ENG itself are different rows.
+        assert make_space(space_id="ENG").PK != make_info().PK
+
+    def test_shares_the_info_sort_key_with_an_issue(self):
+        # Both are the INFO row of their own partition, so the numeric prefix
+        # keeps future space-scoped rows orderable around it.
+        assert make_space().SK == IssueInfo.KEY_ATTRS["SK"] == "100#INFO"
+
+    def test_preset_keys_are_not_overwritten(self):
+        space = make_space(PK="PRESET#PK", SK="PRESET#SK",
+                           GSI1PK="PRESET#GSI1PK", GSI1SK="PRESET#GSI1SK")
+
+        assert space.PK == "PRESET#PK"
+        assert space.SK == "PRESET#SK"
+        assert space.GSI1PK == "PRESET#GSI1PK"
+        assert space.GSI1SK == "PRESET#GSI1SK"
+
+    def test_keyword_only(self):
+        with pytest.raises(TypeError):
+            SpaceInfo("ENG", "Engineering", "test desc")
+
+
+class TestSpaceInfoDefaults:
+    def test_timestamps_default_together(self):
+        space = make_space()
+        assert space.created_at
+        assert space.updated_at == space.created_at
+
+    def test_version_starts_at_one(self):
+        assert make_space().version == 1
+
+    def test_type_version_is_set(self):
+        assert make_space().type_version == "0.0.1"
+
+
+class TestSpaceInfoSerialization:
+    def test_row_is_tagged_with_its_type(self, ts):
+        assert make_space().serialize(ts=ts)["type"] == {"S": "SpaceInfo"}
+
+    def test_description_is_compressed(self, ts):
+        stored = make_space().serialize(ts=ts)["description"]
+        assert "S" not in stored
+        assert gzip.decompress(stored["B"]).decode() == "test desc"
+
+    def test_name_is_not_compressed(self, ts):
+        # Only description is in COMPRESSED_ATTRS; name stays a plain string.
+        assert make_space().serialize(ts=ts)["name"] == {"S": "Engineering"}
+
+    def test_round_trip(self, ts, td):
+        space = make_space()
+        assert SpaceInfo.from_item(space.serialize(ts=ts), td=td) == space
+
+    def test_round_trips_a_multiline_description(self, ts, td):
+        space = make_space(description="line one\nline two")
+        loaded = SpaceInfo.from_item(space.serialize(ts=ts), td=td)
+        assert loaded.description == "line one\nline two"
+
+    def test_serialized_pk_is_primary_key_only(self, ts):
+        assert make_space().serialized_pk(ts=ts) == {
+            "PK": {"S": "SPACE#ENG"},
+            "SK": {"S": "100#INFO"},
+        }
+
+    def test_non_string_description_is_rejected(self):
+        with pytest.raises(DDBArgsError):
+            SpaceInfo.compress_value("description", 123)
+
+    def test_from_item_rejects_a_missing_required_field(self, ts, td):
+        item = make_space().serialize(ts=ts)
+        del item["name"]
+
+        with pytest.raises(msgspec.ValidationError):
+            SpaceInfo.from_item(item, td=td)
+
+
 class TestClassMap:
     def test_keys_match_class_names(self):
         for name, cls in CLASS_MAP.items():
@@ -288,7 +404,7 @@ class TestClassMap:
         assert set(concrete_subclasses(BaseObject)) == set(CLASS_MAP.values())
 
     def test_matches_the_serialized_tag(self, ts):
-        for obj in (make_info(), make_blocker()):
+        for obj in (make_info(), make_blocker(), make_space()):
             tag = obj.serialize(ts=ts)["type"]["S"]
             assert CLASS_MAP[tag] is type(obj)
 

@@ -8,6 +8,7 @@ import pytest
 
 from pl8_base.const import (
     MAX_ISSUE_ID_LEN,
+    MAX_SPACE_ID_LEN,
     MIN_ISSUE_ID_LEN,
 )
 from pl8_base.errors import (
@@ -23,6 +24,7 @@ from pl8_base.util import (
     gen_issue_id,
     isotime,
     retry_on_transaction_conflict,
+    validate_space_id,
 )
 
 
@@ -349,3 +351,54 @@ class TestRetryOnTransactionConflict:
             return (a, b)
 
         assert op(1, b=2) == (1, 2)
+
+
+class TestValidateSpaceId:
+    def test_accepts_a_plain_id(self):
+        validate_space_id("ENG")
+
+    def test_accepts_a_single_character(self):
+        validate_space_id("a")
+
+    def test_accepts_digits_hyphens_and_underscores(self):
+        validate_space_id("my-space_1")
+
+    def test_accepts_the_maximum_length(self):
+        validate_space_id("x" * MAX_SPACE_ID_LEN)
+
+    def test_rejects_an_empty_id(self):
+        with pytest.raises(DDBArgsError, match="empty"):
+            validate_space_id("")
+
+    def test_rejects_a_hash(self):
+        # "#" separates every key group, so a space_id carrying one would make
+        # both SPACE#{space_id} and ISSUE#{space_id}#{issue_id} ambiguous.
+        with pytest.raises(DDBArgsError, match="invalid characters"):
+            validate_space_id("ENG#OPS")
+
+    def test_rejects_whitespace(self):
+        with pytest.raises(DDBArgsError, match="invalid characters"):
+            validate_space_id("ENG ONE")
+
+    def test_rejects_a_trailing_newline(self):
+        # The case a "$" anchored pattern would have let through: "$" matches
+        # before a trailing newline, so the newline would land in the key.
+        with pytest.raises(DDBArgsError, match="invalid characters"):
+            validate_space_id("ENG\n")
+
+    def test_rejects_a_slash(self):
+        with pytest.raises(DDBArgsError, match="invalid characters"):
+            validate_space_id("ENG/x")
+
+    def test_rejects_an_overlong_id(self):
+        with pytest.raises(DDBArgsError, match="too long"):
+            validate_space_id("x" * (MAX_SPACE_ID_LEN + 1))
+
+    def test_rejects_a_non_string(self):
+        # len() on an int would raise TypeError rather than DDBArgsError.
+        with pytest.raises(DDBArgsError, match="must be a string"):
+            validate_space_id(123)
+
+    def test_rejects_none(self):
+        with pytest.raises(DDBArgsError, match="must be a string"):
+            validate_space_id(None)

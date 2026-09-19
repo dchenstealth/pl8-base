@@ -1,18 +1,15 @@
 """Shared fixtures for the pl8-base suite.
 
-The suite is written ahead of the implementation, so most of it is red. Tests
-arrange their state through the real manager methods rather than writing rows
-directly, which means they come green in dependency order:
+Tests arrange their state through the real manager methods rather than writing
+rows directly, so each one asserts against the rows the implementation actually
+writes rather than against a second, hand-written account of what a row should
+look like. test_manager.py's put_raw is the deliberate exception: it exists for
+the corruption cases the API cannot produce.
 
-    1. manager.get_primary_item, manager._build_update
-    2. create_issue, get_issue
-    3. transition_issue
-    4. add_issue_blocker, delete_issue_blocker
-    5. get_issues_by_status, get_issue_blockers, get_issue_blocking
-    6. handle_issue_done, handle_issue_deleted,
-       handle_issue_num_active_blockers_zeroed
-
-test_util.py and test_types.py cover already-implemented code and pass today.
+Only cross-entity fixtures belong here. Anything specific to one entity stays
+local to its own test module, and in particular nothing here may write a row:
+several tests assert exact table contents through scan_all(), so a fixture that
+created, say, a Space would silently break the Issue counts.
 """
 
 import sys

@@ -2,6 +2,7 @@ import base64
 import functools
 import json
 import random
+import re
 import string
 import secrets
 import time
@@ -11,6 +12,7 @@ from datetime import datetime, UTC
 
 from .const import (
     MAX_ISSUE_ID_LEN,
+    MAX_SPACE_ID_LEN,
     MIN_ISSUE_ID_LEN,
     TRANSACT_RETRY_ATTEMPTS,
     TRANSACT_RETRY_BASE_DELAY,
@@ -21,6 +23,10 @@ from .errors import DDBArgsError, DDBTransactionConflictError
 
 # Defaults to [a-zA-Z0-9]
 DEFAULT_ID_ALPHABET = string.ascii_letters + string.digits
+
+# Characters a caller-supplied space_id may use. Excludes "#", the separator
+# every key format string is built on.
+SPACE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 
 
 def isotime(dt=None, timespec="milliseconds"):
@@ -67,6 +73,37 @@ def gen_issue_id(*, issue_id_len=6, alphabet=None):
         alphabet = DEFAULT_ID_ALPHABET
 
     return "".join(secrets.choice(alphabet) for _ in range(issue_id_len))
+
+
+def validate_space_id(space_id):
+    """
+    Validate a caller-supplied space id.
+
+    Unlike issue ids, space ids come from the caller, so nothing has already
+    constrained them. They are interpolated into SPACE#{space_id} and into
+    ISSUE#{space_id}#{issue_id}, so a "#" would make both keys ambiguous.
+
+    Args:
+        space_id (str): id to validate
+
+    Raises:
+        DDBArgsError: if the id is not a string, is empty, is too long, or
+            uses characters outside [A-Za-z0-9_-]
+    """
+    if not isinstance(space_id, str):
+        raise DDBArgsError("Space ID must be a string")
+
+    if not space_id:
+        raise DDBArgsError("Space ID is empty")
+
+    if len(space_id) > MAX_SPACE_ID_LEN:
+        raise DDBArgsError("Space ID too long")
+
+    # fullmatch, not a "$" anchored search: "$" also matches before a trailing
+    # newline, so a space_id ending in one would pass and put that newline
+    # straight into the key.
+    if not SPACE_ID_PATTERN.fullmatch(space_id):
+        raise DDBArgsError("Space ID has invalid characters")
 
 
 def encode_pagination_cursor(exclusive_start_key):

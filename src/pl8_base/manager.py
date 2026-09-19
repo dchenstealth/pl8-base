@@ -3,19 +3,28 @@ import msgspec
 from boto3.dynamodb.types import TypeSerializer, TypeDeserializer
 from botocore.exceptions import ClientError
 
-from .const import TRANSACT_CONFLICT_REASON
+from .const import (
+    CONDITION_FAILED_CODE,
+    CONDITION_FAILED_REASON,
+    TRANSACT_CONFLICT_REASON,
+)
 from .errors import (
     DDBCorruptedError,
     DDBInternalError,
     DDBMissingError,
     DDBTransactionConflictError,
+    DDBVersionConflictError,
 )
-from .mixins import IssueMixin
+from .mixins import IssueMixin, SpaceMixin
 from .types import CLASS_MAP
-from .util import isotime
+from .util import (
+    decode_pagination_cursor,
+    encode_pagination_cursor,
+    isotime,
+)
 
 
-class BasePL8(IssueMixin):
+class BasePL8(IssueMixin, SpaceMixin):
     def __init__(self, *, dynamodb_client, table_name, logger):
         """Init manager.
         Args:
@@ -274,3 +283,130 @@ class BasePL8(IssueMixin):
             # stay stable.
             "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
         }
+
+    def is_condition_failure(self, exc):
+        """Whether a ClientError is a failed ConditionExpression.
+
+        The non-transactional counterpart to raise_for_transaction_conflict:
+        outside a transaction a failed condition arrives as its own error code
+        rather than in CancellationReasons.
+
+        Args:
+            exc (ClientError): exception
+
+        Returns:
+            bool: True if the write failed its condition
+        """
+        return exc.response["Error"]["Code"] == CONDITION_FAILED_CODE
+
+    def failed_reason_item(self, exc, index):
+        """The old item for one cancelled transaction entry, if it failed.
+
+        Args:
+            exc (ClientError): a TransactionCanceledException
+            index (int): position of the entry in TransactItems
+
+        Returns:
+            tuple: (failed, item) where failed is whether that entry's
+                condition failed and item is the parsed pre-write item, which
+                is None when the row did not exist
+        """
+        reasons = self.cancellation_reasons(exc)
+        reason = reasons[index] if index < len(reasons) else {}
+
+        if reason.get("Code") != CONDITION_FAILED_REASON:
+            return False, None
+
+        return True, self.parse_item(reason.get("Item"))
+
+    def paginate(self, query, **kwargs):
+        """Yield every item from a cursor-based query on this manager."""
+        cursor = None
+        while True:
+            page, cursor = query(cursor=cursor, **kwargs)
+            yield from page
+            if cursor is None:
+                return
+
+    def run_query(self, params, cursor=None, limit=None):
+        """Run a query and return one page plus a continuation cursor.
+
+        Returns:
+            tuple: (list[BaseObject], str or None)
+        """
+        params = dict(params, TableName=self.table_name)
+        if limit is not None:
+            params["Limit"] = limit
+        if cursor is not None:
+            params["ExclusiveStartKey"] = decode_pagination_cursor(cursor)
+
+        try:
+            resp = self.dynamodb_client.query(**params)
+        except ClientError as exc:
+            self.log_client_error(exc)
+            raise DDBInternalError(f"Error running query: {str(exc)}") from exc
+
+        items = [self.parse_item(item) for item in resp.get("Items", [])]
+        last_evaluated_key = resp.get("LastEvaluatedKey")
+        next_cursor = (encode_pagination_cursor(last_evaluated_key)
+                       if last_evaluated_key else None)
+
+        return items, next_cursor
+
+    def apply_update(self, update, *, entity, ref, version=None, classify=None,
+                     log_context=None):
+        """Apply a built update and return the item as written.
+
+        Resolves the two failures every conditional write shares, the row being
+        gone and the caller's version being stale, and leaves whatever domain
+        condition the caller added to its own classify hook. Entity-agnostic so
+        each entity shares those semantics by construction rather than by copy.
+
+        Args:
+            update (dict): an update dict from _build_update
+            entity (str): entity name for messages, e.g. "Issue"
+            ref (str): identifies the item in error messages
+            version (int or None): version the write was conditioned on
+            classify (callable or None): called with the pre-write item when a
+                domain condition failed, to raise the matching error
+            log_context (dict or None): structured fields to log when a
+                condition failure cannot be classified
+
+        Returns:
+            BaseObject: the item after the write
+
+        Raises:
+            DDBMissingError: if the item does not exist
+            DDBVersionConflictError: if version is set and did not match
+            DDBInternalError: internal database error
+        """
+        noun = entity.lower()
+
+        try:
+            resp = self.dynamodb_client.update_item(**update,
+                                                    ReturnValues="ALL_NEW")
+        except ClientError as exc:
+            if not self.is_condition_failure(exc):
+                self.log_client_error(exc)
+                raise DDBInternalError(
+                    f"Error updating {noun}: {str(exc)}") from exc
+
+            old = self.old_item_from_exc(exc)
+
+            if old is None:
+                raise DDBMissingError(f"{entity} not found: {ref}") from exc
+
+            if version is not None and old.version != version:
+                raise DDBVersionConflictError(
+                    f"{entity} {ref} changed since it was read") from exc
+
+            if classify is not None:
+                classify(old)
+
+            self.logger.error(
+                f"Unclassified condition failure updating {noun}",
+                **(log_context or {}))
+            raise DDBInternalError(
+                f"Error updating {noun}: {ref}") from exc
+
+        return self.parse_item(resp["Attributes"])

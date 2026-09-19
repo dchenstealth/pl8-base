@@ -5,6 +5,11 @@ MAX_ISSUE_ID_LEN = 16
 MIN_ISSUE_ID_LEN = 3
 RETRY_ISSUE_ID_COLLISIONS = 5
 
+# Bounded because space_id is caller-supplied and composes both SPACE#{space_id}
+# and ISSUE#{space_id}#{issue_id}. 64 leaves the composite key far inside
+# DynamoDB's 2048 byte limit.
+MAX_SPACE_ID_LEN = 64
+
 # Full-jitter exponential backoff for TransactionConflict retries
 TRANSACT_RETRY_ATTEMPTS = 5
 TRANSACT_RETRY_BASE_DELAY = 0.05

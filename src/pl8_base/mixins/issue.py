@@ -1,8 +1,6 @@
 from botocore.exceptions import ClientError
 
 from ..const import (
-    CONDITION_FAILED_CODE,
-    CONDITION_FAILED_REASON,
     GSI1_INDEX_NAME,
     RETRY_ISSUE_ID_COLLISIONS,
 )
@@ -15,12 +13,9 @@ from ..errors import (
     DDBMissingError,
     DDBStillBlockedError,
     DDBTerminalStatusError,
-    DDBVersionConflictError,
 )
 from ..types import IssueBlocker, IssueInfo, IssueStatus
 from ..util import (
-    decode_pagination_cursor,
-    encode_pagination_cursor,
     gen_issue_id,
     isotime,
     retry_on_transaction_conflict,
@@ -82,53 +77,6 @@ class IssueMixin:
                 status_updated_at=status_updated_at, issue_id=issue_id),
         }
 
-    def is_condition_failure(self, exc):
-        return exc.response["Error"]["Code"] == CONDITION_FAILED_CODE
-
-    def failed_reason_item(self, exc, index):
-        """The old item for one cancelled transaction entry, if it failed.
-
-        Args:
-            exc (ClientError): a TransactionCanceledException
-            index (int): position of the entry in TransactItems
-
-        Returns:
-            tuple: (failed, item) where failed is whether that entry's
-                condition failed and item is the parsed pre-write item, which
-                is None when the row did not exist
-        """
-        reasons = self.cancellation_reasons(exc)
-        reason = reasons[index] if index < len(reasons) else {}
-
-        if reason.get("Code") != CONDITION_FAILED_REASON:
-            return False, None
-
-        return True, self.parse_item(reason.get("Item"))
-
-    def issue_before_failed_write(self, exc, *, space_id, issue_id,
-                                  version=None):
-        """The IssueInfo as it was when a conditional write failed.
-
-        Resolves the two failures every write shares, leaving the caller to
-        classify whatever domain condition it added.
-
-        Raises:
-            DDBMissingError: if the Issue does not exist
-            DDBVersionConflictError: if version is set and did not match
-        """
-        old = self.old_item_from_exc(exc)
-
-        if old is None:
-            raise DDBMissingError(
-                f"Issue not found: {space_id}#{issue_id}") from exc
-
-        if version is not None and old.version != version:
-            raise DDBVersionConflictError(
-                f"Issue {space_id}#{issue_id} changed since it was read"
-            ) from exc
-
-        return old
-
     def update_issue_item(self, update, *, space_id, issue_id, version=None,
                           classify=None):
         """Apply a built update to an Issue and return it as written.
@@ -149,61 +97,14 @@ class IssueMixin:
             DDBVersionConflictError: if version is set and did not match
             DDBInternalError: internal database error
         """
-        try:
-            resp = self.dynamodb_client.update_item(**update,
-                                                    ReturnValues="ALL_NEW")
-        except ClientError as exc:
-            if not self.is_condition_failure(exc):
-                self.log_client_error(exc)
-                raise DDBInternalError(
-                    f"Error updating issue: {str(exc)}") from exc
-
-            old = self.issue_before_failed_write(exc, space_id=space_id,
-                                                 issue_id=issue_id,
-                                                 version=version)
-            if classify is not None:
-                classify(old)
-
-            self.logger.error("Unclassified condition failure updating issue",
-                              space_id=space_id, issue_id=issue_id)
-            raise DDBInternalError(
-                f"Error updating issue: {space_id}#{issue_id}") from exc
-
-        return self.parse_item(resp["Attributes"])
-
-    def paginate(self, query, **kwargs):
-        """Yield every item from a cursor-based query on this mixin."""
-        cursor = None
-        while True:
-            page, cursor = query(cursor=cursor, **kwargs)
-            yield from page
-            if cursor is None:
-                return
-
-    def run_query(self, params, cursor=None, limit=None):
-        """Run a query and return one page plus a continuation cursor.
-
-        Returns:
-            tuple: (list[BaseObject], str or None)
-        """
-        params = dict(params, TableName=self.table_name)
-        if limit is not None:
-            params["Limit"] = limit
-        if cursor is not None:
-            params["ExclusiveStartKey"] = decode_pagination_cursor(cursor)
-
-        try:
-            resp = self.dynamodb_client.query(**params)
-        except ClientError as exc:
-            self.log_client_error(exc)
-            raise DDBInternalError(f"Error running query: {str(exc)}") from exc
-
-        items = [self.parse_item(item) for item in resp.get("Items", [])]
-        last_evaluated_key = resp.get("LastEvaluatedKey")
-        next_cursor = (encode_pagination_cursor(last_evaluated_key)
-                       if last_evaluated_key else None)
-
-        return items, next_cursor
+        return self.apply_update(
+            update,
+            entity="Issue",
+            ref=f"{space_id}#{issue_id}",
+            version=version,
+            classify=classify,
+            log_context={"space_id": space_id, "issue_id": issue_id},
+        )
 
     # ------------------------------------------------------------------
     # Issue CRUD
