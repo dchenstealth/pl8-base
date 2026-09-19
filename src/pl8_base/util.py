@@ -97,9 +97,12 @@ def decode_pagination_cursor(cursor):
         str: encoded cursor
 
     Returns:
-        dict: url safe str
+        dict: DynamoDB exclusive_start_key
     """
-    json_bytes = base64.urlsafe_b64decode(cursor)
+    # encode_pagination_cursor strips the padding to keep the cursor tidy, so
+    # put back however much this length implies before decoding.
+    padded = cursor + "=" * (-len(cursor) % 4)
+    json_bytes = base64.urlsafe_b64decode(padded)
     return json.loads(json_bytes.decode())
 
 

@@ -9,3 +9,13 @@ RETRY_ISSUE_ID_COLLISIONS = 5
 TRANSACT_RETRY_ATTEMPTS = 5
 TRANSACT_RETRY_BASE_DELAY = 0.05
 TRANSACT_RETRY_MAX_DELAY = 1.0
+
+# CancellationReasons code marking a transient transaction conflict
+TRANSACT_CONFLICT_REASON = "TransactionConflict"
+# CancellationReasons code marking a failed ConditionExpression
+CONDITION_FAILED_REASON = "ConditionalCheckFailed"
+# Error code a failed ConditionExpression raises outside a transaction
+CONDITION_FAILED_CODE = "ConditionalCheckFailedException"
+
+# Name of the single GSI on the base table
+GSI1_INDEX_NAME = "GSI1"

@@ -17,6 +17,7 @@ test_util.py and test_types.py cover already-implemented code and pass today.
 
 import sys
 
+from datetime import datetime, timedelta, UTC
 from types import SimpleNamespace
 
 import boto3
@@ -103,16 +104,28 @@ def mgr(ctv, dynamodb_client, logger):
 
 @pytest.fixture
 def frozen_clock(monkeypatch):
-    """Replace isotime with a monotonically advancing fake.
+    """Replace isotime with a fake that advances one second per call.
 
     util.isotime is imported by name into types/base.py and types/issue.py, so
     patching pl8_base.util alone would not affect them. Patch every pl8_base
     module that carries the name, so new import sites are covered too.
 
-    Yields a controller with .now() for the current value and .tick() to
-    advance, so tests can pin the exact timestamps that land in GSI1SK.
+    Anchored at the real current time rather than a fixed date, so rows written
+    before this fixture activates still sort before the ones written after it.
+    A fixed past date would make an Issue created by an earlier fixture look
+    newer than everything the test goes on to write.
+
+    Yields a controller with .peek() for the last value handed out and .tick()
+    to skip ahead, so tests can pin the timestamps that land in GSI1SK.
     """
     state = SimpleNamespace(seconds=0)
+    anchor = datetime.now(tz=UTC)
+
+    import pl8_base.util as util_module
+    real_isotime = util_module.isotime
+
+    def at(seconds):
+        return real_isotime(anchor + timedelta(seconds=seconds))
 
     def fake_isotime(dt=None, timespec="milliseconds"):
         if dt is not None:
@@ -120,10 +133,7 @@ def frozen_clock(monkeypatch):
             return real_isotime(dt=dt, timespec=timespec)
 
         state.seconds += 1
-        return f"2026-01-01T00:00:{state.seconds:02d}.000Z"
-
-    import pl8_base.util as util_module
-    real_isotime = util_module.isotime
+        return at(state.seconds)
 
     for name, module in list(sys.modules.items()):
         if not name.startswith("pl8_base"):
@@ -132,7 +142,7 @@ def frozen_clock(monkeypatch):
             monkeypatch.setattr(module, "isotime", fake_isotime)
 
     yield SimpleNamespace(
-        peek=lambda: f"2026-01-01T00:00:{state.seconds:02d}.000Z",
+        peek=lambda: at(state.seconds),
         tick=lambda n=1: setattr(state, "seconds", state.seconds + n),
     )
 

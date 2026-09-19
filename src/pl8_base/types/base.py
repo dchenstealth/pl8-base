@@ -77,19 +77,38 @@ class BaseObject(msgspec.Struct, tag=True, tag_field="type",
     def dict(self):
         return msgspec.to_builtins(self)
 
+    @classmethod
+    def compress_value(cls, attr, value):
+        """Compress one attr value if the attr is compressed on this type.
+
+        Partial writes need the same treatment a full serialize() gives, so
+        both go through here rather than each gzipping on their own.
+
+        Args:
+            attr (str): attribute name
+            value: attribute value
+
+        Returns:
+            bytes or original value: gzipped bytes for a compressed attr,
+                otherwise the value unchanged
+
+        Raises:
+            DDBArgsError: if a compressed attr is not a string
+        """
+        if attr not in cls.COMPRESSED_ATTRS:
+            return value
+
+        if not isinstance(value, str):
+            raise DDBArgsError("Compressed fields must be strings")
+
+        return gzip.compress(value.encode())
+
     def serialize(self, *, ts=None):
         if ts is None:
             ts = TypeSerializer()
 
-        serialized = {}
-        for k, v in self.dict().items():
-            if k in self.COMPRESSED_ATTRS:
-                if not isinstance(v, str):
-                    raise DDBArgsError("Compressed fields must be strings")
-                v = gzip.compress(v.encode())
-            serialized[k] = ts.serialize(v)
-
-        return serialized
+        return {k: ts.serialize(self.compress_value(k, v))
+                for k, v in self.dict().items()}
 
     def serialized_pk(self, *, ts=None):
         if ts is None:
