@@ -766,14 +766,28 @@ class IssueMixin:
             self.log_client_error(exc)
             raise DDBInternalError(f"Error unblocking issue: {str(exc)}") from exc
 
+    @retry_on_transaction_conflict()
     def apply_idempotent_transaction(self, items, message):
         """Apply a transaction whose failed conditions mean "already applied".
 
-        Conflicts still propagate, since those are transient rather than a
-        statement about the data.
+        Retried on conflict here, at the level of the single transaction,
+        rather than on the handle_* method that drives it. A sweep may apply
+        hundreds of these, and restarting the whole sweep, re-querying
+        included, because the 37th write met a concurrent writer would be the
+        wrong unit of work.
+
+        Contention is expected rather than exotic on this path: every blocking
+        Issue reaching DONE at the same time decrements the same blocked
+        Issue's counter. The SQS consumer does redeliver on an exception, but
+        that costs a visibility timeout and leaves Issues BLOCKED longer than
+        the conflict warranted.
+
+        Retrying is safe because every item is conditioned: a retry
+        re-evaluates against current state, and work another writer already did
+        fails its condition and is treated as applied.
 
         Raises:
-            DDBTransactionConflictError: on contention
+            DDBTransactionConflictError: if every attempt conflicts
             DDBInternalError: internal database error
         """
         try:

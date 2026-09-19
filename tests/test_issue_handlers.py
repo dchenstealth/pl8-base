@@ -30,6 +30,18 @@ def block(ctv, mgr):
     return _block
 
 
+def transaction_conflict():
+    """The ClientError a cancelled-on-contention transaction raises."""
+    return ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException",
+                      "Message": "Transaction cancelled"},
+            "CancellationReasons": [{"Code": "TransactionConflict"}],
+        },
+        "TransactWriteItems",
+    )
+
+
 def reload(mgr, ctv, issue, *, space_id=None):
     return mgr.get_issue(space_id=space_id or ctv.space_id,
                          issue_id=issue.issue_id)
@@ -491,6 +503,139 @@ class TestTransactionConflicts:
 
         assert len(calls) == 2
         assert reload(mgr, ctv, blocked).num_active_blockers == 1
+
+    def test_handler_sweep_retries_a_conflict(self, ctv, mgr, make_issue,
+                                              block, monkeypatch):
+        # The sweep is driven by an SQS consumer, but a transient conflict
+        # should not cost a redelivery: every blocking Issue reaching DONE at
+        # once decrements the same counter, so conflicts are expected here.
+        blocker = make_issue("blocker")
+        blocked = make_issue("blocked")
+        block(blocker, blocked)
+        mgr.transition_issue(space_id=ctv.space_id, issue_id=blocker.issue_id,
+                             status=IssueStatus.DONE)
+
+        real = mgr.dynamodb_client.transact_write_items
+        calls = []
+
+        def conflict_once(**kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise transaction_conflict()
+            return real(**kwargs)
+
+        monkeypatch.setattr("pl8_base.util.time.sleep", lambda _: None)
+        monkeypatch.setattr(mgr.dynamodb_client, "transact_write_items",
+                            conflict_once)
+
+        mgr.handle_issue_done(space_id=ctv.space_id, issue_id=blocker.issue_id)
+
+        assert len(calls) == 2
+        assert reload(mgr, ctv, blocked).num_active_blockers == 0
+
+    def test_sweep_retry_is_per_transaction_not_per_sweep(self, ctv, mgr,
+                                                          make_issue, block,
+                                                          monkeypatch):
+        # A conflict on the third blocker must retry that write, not restart
+        # the sweep and redo the two already applied.
+        blocker = make_issue("blocker")
+        blocked = [make_issue(f"blocked-{n}") for n in range(4)]
+        for issue in blocked:
+            block(blocker, issue)
+        mgr.transition_issue(space_id=ctv.space_id, issue_id=blocker.issue_id,
+                             status=IssueStatus.DONE)
+
+        real = mgr.dynamodb_client.transact_write_items
+        calls = []
+
+        def conflict_on_third(**kwargs):
+            calls.append(1)
+            if len(calls) == 3:
+                raise transaction_conflict()
+            return real(**kwargs)
+
+        monkeypatch.setattr("pl8_base.util.time.sleep", lambda _: None)
+        monkeypatch.setattr(mgr.dynamodb_client, "transact_write_items",
+                            conflict_on_third)
+
+        mgr.handle_issue_done(space_id=ctv.space_id, issue_id=blocker.issue_id)
+
+        # 4 blockers plus the one retried write, and no re-application of the
+        # two that had already landed
+        assert len(calls) == 5
+        for issue in blocked:
+            assert reload(mgr, ctv, issue).num_active_blockers == 0
+
+    def test_deleted_sweep_retries_a_conflict(self, ctv, mgr, make_issue,
+                                              block, monkeypatch):
+        subject = make_issue("subject")
+        blocked = make_issue("blocked")
+        block(subject, blocked)
+        mgr.delete_issue(space_id=ctv.space_id, issue_id=subject.issue_id)
+
+        real = mgr.dynamodb_client.transact_write_items
+        calls = []
+
+        def conflict_once(**kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise transaction_conflict()
+            return real(**kwargs)
+
+        monkeypatch.setattr("pl8_base.util.time.sleep", lambda _: None)
+        monkeypatch.setattr(mgr.dynamodb_client, "transact_write_items",
+                            conflict_once)
+
+        mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                 issue_id=subject.issue_id)
+
+        assert len(calls) == 2
+        assert reload(mgr, ctv, blocked).num_active_blockers == 0
+
+    def test_sweep_gives_up_after_repeated_conflicts(self, ctv, mgr,
+                                                     make_issue, block,
+                                                     monkeypatch):
+        # Sustained contention is not transient; the consumer should see it and
+        # let SQS redeliver rather than spin forever.
+        blocker = make_issue("blocker")
+        blocked = make_issue("blocked")
+        block(blocker, blocked)
+        mgr.transition_issue(space_id=ctv.space_id, issue_id=blocker.issue_id,
+                             status=IssueStatus.DONE)
+
+        def always_conflict(**kwargs):
+            raise transaction_conflict()
+
+        monkeypatch.setattr("pl8_base.util.time.sleep", lambda _: None)
+        monkeypatch.setattr(mgr.dynamodb_client, "transact_write_items",
+                            always_conflict)
+
+        with pytest.raises(DDBTransactionConflictError):
+            mgr.handle_issue_done(space_id=ctv.space_id,
+                                  issue_id=blocker.issue_id)
+
+    def test_single_item_handler_writes_are_not_transactions(self, ctv, mgr,
+                                                             make_issue, block,
+                                                             monkeypatch):
+        # handle_issue_num_active_blockers_zeroed updates one item, so it
+        # cannot raise TransactionConflict and needs no retry of its own.
+        blocker = make_issue("blocker")
+        blocked = make_issue("blocked")
+        block(blocker, blocked)
+        mgr.transition_issue(space_id=ctv.space_id, issue_id=blocker.issue_id,
+                             status=IssueStatus.DONE)
+        mgr.handle_issue_done(space_id=ctv.space_id, issue_id=blocker.issue_id)
+
+        def fail_if_called(**kwargs):
+            raise AssertionError("expected a plain UpdateItem")
+
+        monkeypatch.setattr(mgr.dynamodb_client, "transact_write_items",
+                            fail_if_called)
+
+        mgr.handle_issue_num_active_blockers_zeroed(
+            space_id=ctv.space_id, issue_id=blocked.issue_id)
+
+        assert reload(mgr, ctv, blocked).status == IssueStatus.TODO
 
     def test_a_condition_failure_is_not_retried(self, ctv, mgr, make_issue,
                                                 monkeypatch):
