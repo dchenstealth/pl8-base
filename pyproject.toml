@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "aws-lambda-powertools~=3.35.0",
     "boto3~=1.43.40",
     "msgspec~=0.21.1",
 ]
@@ -17,7 +18,6 @@ dev = [
     "moto~=5.2.2",
     "ruff~=0.15.20",
     "pytest~=9.1.1",
-    "aws-lambda-powertools~=3.35.0",
 ]
 
 [tool.pytest.ini_options]

@@ -5,7 +5,7 @@ from .mixins import IssueMixin
 from .types import CLASS_MAP
 
 
-class PL8DDB(IssueMixin):
+class BasePL8(IssueMixin):
     def __init__(self, *, dynamodb_client, table_name, logger):
         """Init manager.
         Args:
@@ -74,7 +74,7 @@ class PL8DDB(IssueMixin):
         # TODO GetItem, raise DDBMissingError if missing
         pass
 
-    def _build_update(self, *, version=None, expected_vals=None, **attrs):
+    def _build_update(self, *, PK, SK, version=None, expected_vals=None, **attrs):
         """Build an update dict for update_item or transact_write_items.
 
         Every write bumps version and sets updated_at. The version *condition*
@@ -93,7 +93,14 @@ class PL8DDB(IssueMixin):
         at-least-once, unordered delivery. Fencing them on version would make
         event replays fail spuriously.
 
+        Conditions are only built here; nothing is raised. The conditions fail
+        at write time as a single ConditionalCheckFailedException, which the
+        caller issuing the write is responsible for mapping onto
+        DDBMissingError, DDBVersionConflictError or a domain error.
+
         Args:
+            PK (str): partition key of the item to update
+            SK (str): sort key of the item to update
             version (int or None): if set, condition the write on this version
             expected_vals (dict or None): attr values to condition on
             **attrs: attrs to set
@@ -101,10 +108,6 @@ class PL8DDB(IssueMixin):
         Returns:
             dict: update dict for update_item, or to wrap in {"Update": <dict>}
                 for transact_write_items
-
-        Raises:
-            DDBMissingError: if the item does not exist
-            DDBVersionConflictError: if version is set and does not match
         """
         # TODO build an update dict that can be passed directly to update_item
         # or can be wrapped in {"Update": <dict>} and passed to transact_write_items

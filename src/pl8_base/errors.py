@@ -49,3 +49,32 @@ class DDBVersionConflictError(DDBError):
     fail again. The caller must re-read and reapply its change.
     """
     pass
+
+
+class DDBTerminalStatusError(DDBError):
+    """Raised when an operation would move an Issue out of DONE, or would
+    mutate an Issue whose DONE status forbids the change.
+
+    DONE is terminal; see types.enums.IssueStatus for why that rule is
+    load-bearing beyond the product requirement.
+    """
+    pass
+
+
+class DDBStillBlockedError(DDBError):
+    """Raised when an Issue would be transitioned out of BLOCKED while it
+    still has active IssueBlockers.
+
+    The caller must delete the remaining IssueBlockers first, or wait for the
+    blocking Issues to reach DONE.
+    """
+    pass
+
+
+class DDBBlockingIssueDoneError(DDBError):
+    """Raised when an IssueBlocker would name a DONE Issue as the blocker.
+
+    A DONE Issue blocks nothing; the relationship would be created already
+    satisfied.
+    """
+    pass

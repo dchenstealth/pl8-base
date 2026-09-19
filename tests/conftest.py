@@ -1,0 +1,172 @@
+"""Shared fixtures for the pl8-base suite.
+
+The suite is written ahead of the implementation, so most of it is red. Tests
+arrange their state through the real manager methods rather than writing rows
+directly, which means they come green in dependency order:
+
+    1. manager.get_primary_item, manager._build_update
+    2. create_issue, get_issue
+    3. transition_issue
+    4. add_issue_blocker, delete_issue_blocker
+    5. get_issues_by_status, get_issue_blockers, get_issue_blocking
+    6. handle_issue_done, handle_issue_deleted,
+       handle_issue_num_active_blockers_zeroed
+
+test_util.py and test_types.py cover already-implemented code and pass today.
+"""
+
+import sys
+
+from types import SimpleNamespace
+
+import boto3
+import pytest
+
+from aws_lambda_powertools import Logger
+from moto import mock_aws
+
+from pl8_base.manager import BasePL8
+
+
+@pytest.fixture
+def aws_environment(monkeypatch):
+    """Fake credentials so a misconfigured test cannot reach real AWS."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_SECURITY_TOKEN", "testing")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+
+
+@pytest.fixture
+def mocked_aws(aws_environment):
+    with mock_aws():
+        yield
+
+
+@pytest.fixture
+def ctv():
+    """Common test values."""
+    return SimpleNamespace(
+        table_name="test-base-table",
+        region="us-east-1",
+        space_id="ENG",
+        other_space_id="OPS",
+    )
+
+
+@pytest.fixture
+def dynamodb_client(ctv, mocked_aws):
+    client = boto3.client("dynamodb", region_name=ctv.region)
+    client.create_table(
+        TableName=ctv.table_name,
+        BillingMode="PAY_PER_REQUEST",
+        AttributeDefinitions=[
+            {"AttributeName": "PK", "AttributeType": "S"},
+            {"AttributeName": "SK", "AttributeType": "S"},
+            {"AttributeName": "GSI1PK", "AttributeType": "S"},
+            {"AttributeName": "GSI1SK", "AttributeType": "S"},
+        ],
+        KeySchema=[
+            {"AttributeName": "PK", "KeyType": "HASH"},
+            {"AttributeName": "SK", "KeyType": "RANGE"},
+        ],
+        GlobalSecondaryIndexes=[{
+            "IndexName": "GSI1",
+            "KeySchema": [
+                {"AttributeName": "GSI1PK", "KeyType": "HASH"},
+                {"AttributeName": "GSI1SK", "KeyType": "RANGE"},
+            ],
+            "Projection": {"ProjectionType": "ALL"},
+        }],
+    )
+    yield client
+
+
+@pytest.fixture
+def logger():
+    """Powertools logger, not stdlib.
+
+    manager.parse_item calls self.logger.error(msg, item=item, ...), passing
+    arbitrary kwargs to be merged into the log record. A stdlib logging.Logger
+    raises TypeError on those.
+    """
+    yield Logger(service="pl8-base-test", level="DEBUG")
+
+
+@pytest.fixture
+def mgr(ctv, dynamodb_client, logger):
+    yield BasePL8(dynamodb_client=dynamodb_client,
+                  table_name=ctv.table_name,
+                  logger=logger)
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    """Replace isotime with a monotonically advancing fake.
+
+    util.isotime is imported by name into types/base.py and types/issue.py, so
+    patching pl8_base.util alone would not affect them. Patch every pl8_base
+    module that carries the name, so new import sites are covered too.
+
+    Yields a controller with .now() for the current value and .tick() to
+    advance, so tests can pin the exact timestamps that land in GSI1SK.
+    """
+    state = SimpleNamespace(seconds=0)
+
+    def fake_isotime(dt=None, timespec="milliseconds"):
+        if dt is not None:
+            # Defer to the real implementation for explicit datetimes
+            return real_isotime(dt=dt, timespec=timespec)
+
+        state.seconds += 1
+        return f"2026-01-01T00:00:{state.seconds:02d}.000Z"
+
+    import pl8_base.util as util_module
+    real_isotime = util_module.isotime
+
+    for name, module in list(sys.modules.items()):
+        if not name.startswith("pl8_base"):
+            continue
+        if getattr(module, "isotime", None) is real_isotime:
+            monkeypatch.setattr(module, "isotime", fake_isotime)
+
+    yield SimpleNamespace(
+        peek=lambda: f"2026-01-01T00:00:{state.seconds:02d}.000Z",
+        tick=lambda n=1: setattr(state, "seconds", state.seconds + n),
+    )
+
+
+@pytest.fixture
+def get_raw(ctv, dynamodb_client):
+    """Read one row as raw DynamoDB AttributeValues, or None if absent.
+
+    Read-only on purpose: tests assert against the rows the implementation
+    wrote, rather than against a second hand-written definition of what a row
+    should look like.
+    """
+    def _get_raw(PK, SK):
+        resp = dynamodb_client.get_item(
+            TableName=ctv.table_name,
+            Key={"PK": {"S": PK}, "SK": {"S": SK}},
+        )
+        return resp.get("Item")
+
+    return _get_raw
+
+
+@pytest.fixture
+def scan_all(ctv, dynamodb_client):
+    """Every row in the table, for "nothing else was written" assertions."""
+    def _scan_all():
+        items = []
+        params = {"TableName": ctv.table_name}
+        while True:
+            resp = dynamodb_client.scan(**params)
+            items.extend(resp.get("Items", []))
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                return items
+            params["ExclusiveStartKey"] = last_key
+
+    return _scan_all

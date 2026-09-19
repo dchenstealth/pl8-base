@@ -377,13 +377,13 @@ name = "pl8-base"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [
+    { name = "aws-lambda-powertools" },
     { name = "boto3" },
     { name = "msgspec" },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "aws-lambda-powertools" },
     { name = "moto" },
     { name = "pytest" },
     { name = "ruff" },
@@ -391,13 +391,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aws-lambda-powertools", specifier = "~=3.35.0" },
     { name = "boto3", specifier = "~=1.43.40" },
     { name = "msgspec", specifier = "~=0.21.1" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "aws-lambda-powertools", specifier = "~=3.35.0" },
     { name = "moto", specifier = "~=5.2.2" },
     { name = "pytest", specifier = "~=9.1.1" },
     { name = "ruff", specifier = "~=0.15.20" },
