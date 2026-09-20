@@ -194,7 +194,7 @@ class IssueMixin:
             tuple: (list[IssueInfo], str or None)
 
         Raises:
-            DDBArgsError: if space_id or status is invalid
+            DDBArgsError: if space_id, status or cursor is invalid
             DDBInternalError: internal database error
         """
         validate_space_id(space_id)
@@ -225,7 +225,7 @@ class IssueMixin:
             tuple: (list[IssueBlocker], str or None)
 
         Raises:
-            DDBArgsError: if space_id is invalid
+            DDBArgsError: if space_id or cursor is invalid
             DDBInternalError: internal database error
         """
         validate_space_id(space_id)
@@ -252,7 +252,7 @@ class IssueMixin:
             tuple: (list[IssueBlocker], str or None)
 
         Raises:
-            DDBArgsError: if space_id is invalid
+            DDBArgsError: if space_id or cursor is invalid
             DDBInternalError: internal database error
         """
         validate_space_id(space_id)

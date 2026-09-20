@@ -170,17 +170,36 @@ def decode_pagination_cursor(cursor):
     """
     Decode a pagination cursor to a DynamoDB ExclusiveStartKey.
 
+    A cursor is round-tripped through whatever client is paging, so it arrives
+    here as untrusted input: everything it can fail on is reported as one
+    DDBArgsError rather than leaking a base64 or JSON error to the caller.
+
     Args:
         str: encoded cursor
 
     Returns:
         dict: DynamoDB exclusive_start_key
+
+    Raises:
+        DDBArgsError: if the cursor is not a well-formed encoded start key
     """
-    # encode_pagination_cursor strips the padding to keep the cursor tidy, so
-    # put back however much this length implies before decoding.
-    padded = cursor + "=" * (-len(cursor) % 4)
-    json_bytes = base64.urlsafe_b64decode(padded)
-    return json.loads(json_bytes.decode())
+    try:
+        # encode_pagination_cursor strips the padding to keep the cursor tidy,
+        # so put back however much this length implies before decoding.
+        padded = cursor + "=" * (-len(cursor) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded).decode())
+    except Exception:
+        raise DDBArgsError("Invalid pagination cursor")
+
+    # An ExclusiveStartKey is a flat map of attr name to AttributeValue.
+    # Checking the shape here keeps a malformed cursor a bad argument rather
+    # than something boto3 rejects as a malformed request further down.
+    if not isinstance(decoded, dict) or not all(
+            isinstance(k, str) and isinstance(v, dict)
+            for k, v in decoded.items()):
+        raise DDBArgsError("Invalid pagination cursor")
+
+    return decoded
 
 
 def retry_on_transaction_conflict(*, attempts=TRANSACT_RETRY_ATTEMPTS,

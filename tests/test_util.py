@@ -107,6 +107,7 @@ class TestCleanupDecimals:
         assert result["flag"] is False
 
 
+
 class TestGenIssueId:
     def test_default_length(self):
         assert len(gen_issue_id()) == 6
@@ -194,6 +195,51 @@ class TestPaginationCursor:
     def test_encode_rejects_non_json_object(self):
         with pytest.raises(DDBArgsError, match="Invalid exclusive start key"):
             encode_pagination_cursor({"PK": object()})
+
+    # A cursor is handed back by whatever client is paging, so decode is a
+    # trust boundary: every way it can fail is one DDBArgsError, never a
+    # base64 or JSON error escaping to the caller.
+    @pytest.mark.parametrize("cursor", [
+        "!!!not-base64!!!",
+        "@@@@",
+        "",
+        "not base64 at all",
+    ])
+    def test_decode_rejects_a_malformed_cursor(self, cursor):
+        with pytest.raises(DDBArgsError, match="Invalid pagination cursor"):
+            decode_pagination_cursor(cursor)
+
+    def test_decode_rejects_valid_base64_that_is_not_json(self):
+        cursor = base64.urlsafe_b64encode(b"\xff\xfe not json").decode()
+
+        with pytest.raises(DDBArgsError, match="Invalid pagination cursor"):
+            decode_pagination_cursor(cursor)
+
+    def test_decode_rejects_a_non_string_cursor(self):
+        with pytest.raises(DDBArgsError, match="Invalid pagination cursor"):
+            decode_pagination_cursor(None)
+
+    # An ExclusiveStartKey is a flat map of attr name to AttributeValue.
+    # Anything else would reach boto3 as a malformed request instead.
+    @pytest.mark.parametrize("payload", [
+        [{"PK": {"S": "ISSUE#ENG#abc"}}],
+        "a bare string",
+        42,
+        None,
+        {"PK": "not an attribute value"},
+        {"PK": {"S": "ISSUE#ENG#abc"}, "SK": ["100#INFO"]},
+    ])
+    def test_decode_rejects_a_key_of_the_wrong_shape(self, payload):
+        raw = json.dumps(payload).encode()
+        cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+        with pytest.raises(DDBArgsError, match="Invalid pagination cursor"):
+            decode_pagination_cursor(cursor)
+
+    def test_decode_accepts_an_empty_key(self):
+        cursor = base64.urlsafe_b64encode(b"{}").decode().rstrip("=")
+
+        assert decode_pagination_cursor(cursor) == {}
 
 
 class TestValidateIssueStatus:

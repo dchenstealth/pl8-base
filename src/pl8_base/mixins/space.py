@@ -109,6 +109,7 @@ class SpaceMixin:
             tuple: (list[SpaceInfo], str or None)
 
         Raises:
+            DDBArgsError: if cursor is invalid
             DDBInternalError: internal database error
         """
         return self.run_query({
