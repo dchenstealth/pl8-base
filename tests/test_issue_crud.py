@@ -679,3 +679,72 @@ class TestIssueStatusValidation:
 
         with pytest.raises(DDBCorruptedError):
             mgr.get_issue(space_id=ctv.space_id, issue_id=new_issue.issue_id)
+
+
+class TestTransitionIssueVersioning:
+    """transition_issue fences on version like update_issue does; see
+    _build_update on why consumer-facing writes take it and handle_* must
+    not."""
+
+    def test_matching_version_applies(self, ctv, mgr, new_issue):
+        updated = mgr.transition_issue(space_id=ctv.space_id,
+                                       issue_id=new_issue.issue_id,
+                                       status=IssueStatus.IN_PROGRESS,
+                                       version=new_issue.version)
+
+        assert updated.status == IssueStatus.IN_PROGRESS
+        assert updated.version == new_issue.version + 1
+
+    def test_stale_version_is_rejected(self, ctv, mgr, new_issue):
+        mgr.update_issue(space_id=ctv.space_id, issue_id=new_issue.issue_id,
+                         title="moved on", description="d")
+
+        with pytest.raises(DDBVersionConflictError):
+            mgr.transition_issue(space_id=ctv.space_id,
+                                 issue_id=new_issue.issue_id,
+                                 status=IssueStatus.IN_PROGRESS,
+                                 version=new_issue.version)
+
+    def test_stale_version_leaves_the_row_untouched(self, ctv, mgr, new_issue):
+        mgr.update_issue(space_id=ctv.space_id, issue_id=new_issue.issue_id,
+                         title="moved on", description="d")
+        before = mgr.get_issue(space_id=ctv.space_id,
+                               issue_id=new_issue.issue_id)
+
+        with pytest.raises(DDBVersionConflictError):
+            mgr.transition_issue(space_id=ctv.space_id,
+                                 issue_id=new_issue.issue_id,
+                                 status=IssueStatus.IN_PROGRESS,
+                                 version=new_issue.version)
+
+        assert mgr.get_issue(space_id=ctv.space_id,
+                             issue_id=new_issue.issue_id) == before
+
+    def test_omitting_version_still_applies_unfenced(self, ctv, mgr,
+                                                     new_issue):
+        mgr.update_issue(space_id=ctv.space_id, issue_id=new_issue.issue_id,
+                         title="moved on", description="d")
+        updated = mgr.transition_issue(space_id=ctv.space_id,
+                                       issue_id=new_issue.issue_id,
+                                       status=IssueStatus.IN_PROGRESS)
+
+        assert updated.status == IssueStatus.IN_PROGRESS
+
+    def test_missing_issue_raises_missing_not_version_conflict(self, ctv, mgr):
+        with pytest.raises(DDBMissingError):
+            mgr.transition_issue(space_id=ctv.space_id, issue_id="nope",
+                                 status=IssueStatus.DONE, version=1)
+
+    def test_a_domain_error_still_classifies_under_a_matching_version(
+            self, ctv, mgr, new_issue):
+        """version is checked before classify, so a matching version must not
+        mask the terminal-status rule."""
+        done = mgr.transition_issue(space_id=ctv.space_id,
+                                    issue_id=new_issue.issue_id,
+                                    status=IssueStatus.DONE)
+
+        with pytest.raises(DDBTerminalStatusError):
+            mgr.transition_issue(space_id=ctv.space_id,
+                                 issue_id=new_issue.issue_id,
+                                 status=IssueStatus.TODO,
+                                 version=done.version)

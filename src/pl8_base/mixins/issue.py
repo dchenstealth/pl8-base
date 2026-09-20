@@ -301,19 +301,21 @@ class IssueMixin:
         return self.update_issue_item(update, space_id=space_id,
                                       issue_id=issue_id, version=version)
 
-    def transition_issue(self, *, space_id, issue_id, status):
+    def transition_issue(self, *, space_id, issue_id, status, version=None):
         """Move an Issue to a new status.
 
         Args:
             space_id (str): id of the issue's space
             issue_id (str): id of the issue
             status (str or IssueStatus): status to move to
+            version (int or None): if set, fence the write on this version
 
         Returns: IssueInfo
 
         Raises:
             DDBArgsError: if space_id or status is invalid
             DDBMissingError: if the Issue does not exist
+            DDBVersionConflictError: if version is set and did not match
             DDBTerminalStatusError: if the Issue is DONE and would leave it
             DDBStillBlockedError: if the Issue still has active blockers
             DDBInternalError: internal database error
@@ -333,6 +335,7 @@ class IssueMixin:
         update = self._build_update(
             PK=self.issue_pk(space_id, issue_id),
             SK=IssueInfo.KEY_ATTRS["SK"],
+            version=version,
             expected_vals=expected_vals,
             excluded_vals=excluded_vals,
             **self.status_attrs(space_id=space_id, issue_id=issue_id,
@@ -350,7 +353,8 @@ class IssueMixin:
                     f"{old.num_active_blockers} active blockers")
 
         return self.update_issue_item(update, space_id=space_id,
-                                      issue_id=issue_id, classify=classify)
+                                      issue_id=issue_id, version=version,
+                                      classify=classify)
 
     def delete_issue(self, *, space_id, issue_id):
         """Delete an Issue's info row.
