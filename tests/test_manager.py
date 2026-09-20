@@ -95,12 +95,25 @@ class TestParseItem:
 
 
 class TestLogClientError:
-    def test_logs_without_raising(self, mgr):
-        exc = ClientError(
+    @pytest.fixture
+    def exc(self):
+        return ClientError(
             {"Error": {"Code": "ValidationException", "Message": "bad"}},
             "PutItem",
         )
+
+    def test_logs_without_raising(self, mgr, exc):
         mgr.log_client_error(exc)
+
+    def test_merges_the_response_as_a_structured_field(self, mgr, exc, caplog):
+        """One logging convention across the manager: context goes in as
+        keyword args, which is what the injected powertools Logger merges into
+        the record and what a stdlib Logger would reject. See the README."""
+        mgr.log_client_error(exc)
+        record = caplog.records[-1]
+
+        assert record.getMessage() == "ClientError (code: ValidationException)"
+        assert record.response == exc.response
 
 
 class TestGetPrimaryItem:

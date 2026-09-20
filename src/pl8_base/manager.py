@@ -51,7 +51,7 @@ class BasePL8(IssueMixin, SpaceMixin):
         """
         error_code = exc.response["Error"]["Code"]
         self.logger.exception(f"ClientError (code: {error_code})",
-                              extra={"Response": exc.response})
+                              response=exc.response)
 
     def parse_item(self, item):
         """Util method for parsing a raw dynamodb item into a dataclass.
