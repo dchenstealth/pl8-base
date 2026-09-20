@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: MIT
 
+from types import SimpleNamespace
+
+import msgspec
 import pytest
 
 from botocore.exceptions import ClientError
@@ -828,3 +831,128 @@ class TestUnblockingFlows:
 
         with pytest.raises(DDBMissingError):
             mgr.get_issue(space_id=ctv.space_id, issue_id=blocked.issue_id)
+
+
+class TestSweepDoesNotTrustTheQueriedFlag:
+    """handle_issue_deleted's phase-1 sweep reads is_blocking_issue_done from
+    its query, then writes conditioned on it. handle_issue_done can flip that
+    flag False -> True in between, and the whole point of the sweep is that no
+    IssueBlocker outlives an Issue that names it (entities.md). So a failed
+    condition must fall through to the plain delete rather than be read as
+    "another writer already did this".
+    """
+
+    @pytest.fixture
+    def satisfied_blocker(self, ctv, mgr, make_issue, block):
+        """A blocker whose flag has since flipped, plus the stale row a sweep
+        that queried before the flip would be holding."""
+        blocking = make_issue("blocking")
+        blocked = make_issue("blocked")
+        blocker = block(blocking, blocked)
+
+        mgr.transition_issue(space_id=ctv.space_id,
+                             issue_id=blocking.issue_id,
+                             status=IssueStatus.DONE)
+        mgr.handle_issue_done(space_id=ctv.space_id,
+                              issue_id=blocking.issue_id)
+
+        stale = msgspec.structs.replace(blocker, is_blocking_issue_done=False)
+        return SimpleNamespace(blocking=blocking, blocked=blocked, stale=stale)
+
+    def test_the_row_is_deleted_anyway(self, ctv, mgr, satisfied_blocker,
+                                       scan_all):
+        mgr.delete_blocker_for_sweep(satisfied_blocker.stale)
+
+        remaining = [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"]
+        assert remaining == []
+
+    def test_the_counter_is_not_decremented_twice(self, ctv, mgr,
+                                                  satisfied_blocker):
+        before = reload(mgr, ctv, satisfied_blocker.blocked)
+        assert before.num_active_blockers == 0
+
+        mgr.delete_blocker_for_sweep(satisfied_blocker.stale)
+
+        assert reload(mgr, ctv,
+                      satisfied_blocker.blocked).num_active_blockers == 0
+
+    def test_end_to_end_when_done_is_handled_before_deleted(
+            self, ctv, mgr, make_issue, block, scan_all):
+        """The delivery order that produces the stale read: IssueDone lands
+        first, then IssueDeleted for the same Issue."""
+        blocking = make_issue("blocking")
+        blocked = make_issue("blocked")
+        block(blocking, blocked)
+
+        mgr.transition_issue(space_id=ctv.space_id,
+                             issue_id=blocking.issue_id,
+                             status=IssueStatus.DONE)
+        mgr.handle_issue_done(space_id=ctv.space_id,
+                              issue_id=blocking.issue_id)
+        mgr.delete_issue(space_id=ctv.space_id, issue_id=blocking.issue_id)
+        mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                 issue_id=blocking.issue_id)
+
+        remaining = [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"]
+        assert remaining == []
+        assert reload(mgr, ctv, blocked).num_active_blockers == 0
+
+    def test_an_active_blocker_still_decrements(self, ctv, mgr, make_issue,
+                                                block, scan_all):
+        """The unchanged path: a flag that really is False still takes the
+        transactional form, so the counter comes down with the row."""
+        blocking = make_issue("blocking")
+        blocked = make_issue("blocked")
+        blocker = block(blocking, blocked)
+
+        assert reload(mgr, ctv, blocked).num_active_blockers == 1
+
+        mgr.delete_blocker_for_sweep(blocker)
+
+        assert reload(mgr, ctv, blocked).num_active_blockers == 0
+        assert [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"] == []
+
+    def test_a_blocker_whose_blocked_issue_is_gone_is_still_deleted(
+            self, ctv, mgr, make_issue, block, scan_all):
+        """The other way the transaction's condition fails: there is no
+        counter left to decrement, and the row must still go."""
+        blocking = make_issue("blocking")
+        blocked = make_issue("blocked")
+        blocker = block(blocking, blocked)
+
+        mgr.delete_issue(space_id=ctv.space_id, issue_id=blocked.issue_id)
+        mgr.delete_blocker_for_sweep(blocker)
+
+        assert [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"] == []
+
+    def test_a_replayed_sweep_is_still_a_no_op(self, ctv, mgr,
+                                               satisfied_blocker, scan_all):
+        """Falling through to the plain delete must not break idempotency:
+        delete_blocker_row tolerates the row already being gone."""
+        mgr.delete_blocker_for_sweep(satisfied_blocker.stale)
+        mgr.delete_blocker_for_sweep(satisfied_blocker.stale)
+
+        assert [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"] == []
+        assert reload(mgr, ctv,
+                      satisfied_blocker.blocked).num_active_blockers == 0
+
+
+class TestApplyIdempotentTransactionReportsOutcome:
+    def test_returns_true_when_applied(self, ctv, mgr, make_issue):
+        issue = make_issue("issue")
+        applied = mgr.apply_idempotent_transaction([
+            {"Update": mgr._build_update(
+                PK=issue.PK, SK=issue.SK, title="moved")},
+        ], "Error in test")
+
+        assert applied is True
+        assert reload(mgr, ctv, issue).title == "moved"
+
+    def test_returns_false_when_a_condition_failed(self, ctv, mgr):
+        applied = mgr.apply_idempotent_transaction([
+            {"Update": mgr._build_update(
+                PK=mgr.issue_pk(ctv.space_id, "nope"),
+                SK="100#INFO", title="moved")},
+        ], "Error in test")
+
+        assert applied is False

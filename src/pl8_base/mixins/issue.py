@@ -672,23 +672,36 @@ class IssueMixin:
             self.delete_blocker_row(issue_blocker)
 
     def delete_blocker_for_sweep(self, issue_blocker):
-        """Delete one outbound IssueBlocker, decrementing if it was active."""
-        blocker_key = self.issue_blocker_key(issue_blocker)
+        """Delete one outbound IssueBlocker, decrementing if it was active.
 
-        if issue_blocker.is_blocking_issue_done:
-            # Already decremented when the blocking Issue went DONE
-            self.delete_blocker_row(issue_blocker)
-            return
+        is_blocking_issue_done comes from the sweep's query, so it may already
+        be stale: handle_issue_done can flip it False -> True between that read
+        and this write. The row must go either way, so the decrementing form is
+        only ever attempted, never relied on, and a failed condition falls
+        through to the plain delete rather than being read as "already done".
+        Treating the failure as already-applied is what would leave an
+        IssueBlocker outliving the Issue that named it.
+        """
+        if not issue_blocker.is_blocking_issue_done:
+            blocker_key = self.issue_blocker_key(issue_blocker)
+            applied = self.apply_idempotent_transaction([
+                {"Delete": self.active_blocker_delete(blocker_key)},
+                {"Update": self._build_update(
+                    PK=self.issue_pk(issue_blocker.blocked_issue_space_id,
+                                     issue_blocker.blocked_issue_id),
+                    SK=IssueInfo.KEY_ATTRS["SK"],
+                    increments={"num_active_blockers": -1},
+                )},
+            ], "Error sweeping issue blocker")
 
-        self.apply_idempotent_transaction([
-            {"Delete": self.active_blocker_delete(blocker_key)},
-            {"Update": self._build_update(
-                PK=self.issue_pk(issue_blocker.blocked_issue_space_id,
-                                 issue_blocker.blocked_issue_id),
-                SK=IssueInfo.KEY_ATTRS["SK"],
-                increments={"num_active_blockers": -1},
-            )},
-        ], "Error sweeping issue blocker")
+            if applied:
+                return
+
+        # Either the blocker was already satisfied, in which case the counter
+        # was decremented when the blocking Issue went DONE, or the blocked
+        # Issue is itself gone and has no counter left to hold. Both leave the
+        # row to delete without a decrement.
+        self.delete_blocker_row(issue_blocker)
 
     def delete_blocker_row(self, issue_blocker):
         """Delete one IssueBlocker row, tolerating it already being gone."""
@@ -763,6 +776,12 @@ class IssueMixin:
         re-evaluates against current state, and work another writer already did
         fails its condition and is treated as applied.
 
+        Returns:
+            bool: True if the transaction was applied, False if a condition
+                failed. False does not always mean the work is done: a caller
+                whose conditions were built from a possibly stale read must
+                decide what the failure meant; see delete_blocker_for_sweep.
+
         Raises:
             DDBTransactionConflictError: if every attempt conflicts
             DDBInternalError: internal database error
@@ -775,7 +794,9 @@ class IssueMixin:
             for index in range(len(items)):
                 failed, _ = self.failed_reason_item(exc, index)
                 if failed:
-                    return
+                    return False
 
             self.log_client_error(exc)
             raise DDBInternalError(f"{message}: {str(exc)}") from exc
+
+        return True
