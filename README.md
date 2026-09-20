@@ -67,11 +67,5 @@ pl8.transition_issue(space_id="eng", issue_id=issue.issue_id,
 ## Deploying
 
 `pl8-base` only talks to a DynamoDB table you already have; it doesn't
-provision or run anything in AWS itself. To actually stand up PL8:
-
-* [pl8-services](https://github.com/dchenstealth/pl8-services) — the IaC and
-  Lambda functions (`pl8-interface`, `pl8-stream-handler`,
-  `pl8-event-handler`) that provision the table and run PL8 in AWS, built on
-  top of this library.
-* [pl8-cli](https://github.com/dchenstealth/pl8-cli) — the CLI used to talk
-  to a deployed PL8, authenticated through AWS IAM.
+provision or run anything in AWS itself. Work is underway to create other
+repos to scaffold this.
