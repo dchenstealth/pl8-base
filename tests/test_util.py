@@ -106,6 +106,20 @@ class TestCleanupDecimals:
         result = cleanup_decimals({"flag": False})
         assert result["flag"] is False
 
+    def test_does_not_mutate_the_input(self):
+        original = {"a": Decimal("1"), "b": {"c": Decimal("2.5")},
+                    "d": [Decimal("3")]}
+        result = cleanup_decimals(original)
+
+        assert original == {"a": Decimal("1"), "b": {"c": Decimal("2.5")},
+                            "d": [Decimal("3")]}
+        assert result is not original
+        assert result["b"] is not original["b"]
+        assert result["d"] is not original["d"]
+
+    def test_empty_containers_round_trip(self):
+        assert cleanup_decimals({}) == {}
+        assert cleanup_decimals([]) == []
 
 
 class TestGenIssueId:

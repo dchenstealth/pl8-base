@@ -46,14 +46,30 @@ def isotime(dt=None, timespec="milliseconds"):
 
 
 def cleanup_decimals(d):
+    """
+    Replace every Decimal in a structure with an int or a float.
+
+    boto3's TypeDeserializer hands back Decimal for every N attribute, which
+    msgspec will not convert to an int or float field. Returns a new
+    structure rather than editing in place, so the caller's copy of a
+    deserialized item is left as it was.
+
+    Args:
+        d: any value, searched recursively through dicts and lists
+
+    Returns:
+        the same structure with each Decimal replaced by an int when it is
+        integral, otherwise a float
+    """
     if isinstance(d, Decimal):
         int_d = int(d)
         return int_d if d == int_d else float(d)
-    elif isinstance(d, dict):
-        for k in d:
-            d[k] = cleanup_decimals(d[k])
-    elif isinstance(d, list):
-        d = [cleanup_decimals(le) for le in d]
+
+    if isinstance(d, dict):
+        return {k: cleanup_decimals(v) for k, v in d.items()}
+
+    if isinstance(d, list):
+        return [cleanup_decimals(le) for le in d]
 
     return d
 
