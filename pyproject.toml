@@ -1,0 +1,56 @@
+[project]
+name = "pl8-base"
+version = "0.0.1"
+description = "PL8, a lightweight issue tracker backed by DynamoDB"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Daniel Chen", email = "danieljnchen@gmail.com" }
+]
+requires-python = ">=3.11"
+keywords = ["issue-tracker", "dynamodb", "aws", "lambda"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+dependencies = [
+    "boto3~=1.43.40",
+    "msgspec~=0.21.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/dchenstealth/pl8-base"
+Repository = "https://github.com/dchenstealth/pl8-base"
+Issues = "https://github.com/dchenstealth/pl8-base/issues"
+
+[dependency-groups]
+dev = [
+    "aws-lambda-powertools~=3.35.0",
+    "moto~=5.2.2",
+    "ruff~=0.16.8",
+    "pytest~=9.1.1",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# FURB157 would rewrite Decimal("5") as Decimal(5). The cleanup_decimals
+# tests pair an integral case with a fractional one throughout, and only the
+# integral half of each pair can be rewritten, so taking the fix leaves every
+# pair visually mismatched. The string form also mirrors how boto3 hands
+# these values back.
+"tests/test_util.py" = ["FURB157"]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "src",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
