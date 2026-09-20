@@ -12,7 +12,6 @@ from pl8_base.types import (
     IssueReady,
 )
 
-
 EVENT_CLASSES = [IssueNumActiveBlockersZeroed, IssueDeleted, IssueDone, IssueReady]
 
 

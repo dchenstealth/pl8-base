@@ -4,8 +4,7 @@ import abc
 import gzip
 
 import msgspec
-
-from boto3.dynamodb.types import TypeSerializer, TypeDeserializer
+from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 
 from ..errors import DDBArgsError
 from ..util import cleanup_decimals, isotime

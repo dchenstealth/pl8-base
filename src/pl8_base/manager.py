@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 import msgspec
-
-from boto3.dynamodb.types import TypeSerializer, TypeDeserializer
+from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 from botocore.exceptions import ClientError
 
 from .const import (
@@ -85,9 +84,9 @@ class BasePL8(IssueMixin, SpaceMixin):
         try:
             parsed = type_class.from_item(item, td=self.td)
         except Exception as exc:
-            self.logger.error("Malformed item", item_type=item_type,
-                              item=item, exc_info=True)
-            raise DDBCorruptedError(f"Malformed item: {str(exc)}")
+            self.logger.exception("Malformed item", item_type=item_type,
+                                  item=item)
+            raise DDBCorruptedError(f"Malformed item: {exc!s}")
 
         return parsed
 
@@ -185,7 +184,7 @@ class BasePL8(IssueMixin, SpaceMixin):
             )
         except ClientError as exc:
             self.log_client_error(exc)
-            raise DDBInternalError(f"Error loading item: {str(exc)}") from exc
+            raise DDBInternalError(f"Error loading item: {exc!s}") from exc
 
         item = resp.get("Item")
         if item is None:
@@ -346,7 +345,7 @@ class BasePL8(IssueMixin, SpaceMixin):
             resp = self.dynamodb_client.query(**params)
         except ClientError as exc:
             self.log_client_error(exc)
-            raise DDBInternalError(f"Error running query: {str(exc)}") from exc
+            raise DDBInternalError(f"Error running query: {exc!s}") from exc
 
         items = [self.parse_item(item) for item in resp.get("Items", [])]
         last_evaluated_key = resp.get("LastEvaluatedKey")
@@ -391,7 +390,7 @@ class BasePL8(IssueMixin, SpaceMixin):
             if not self.is_condition_failure(exc):
                 self.log_client_error(exc)
                 raise DDBInternalError(
-                    f"Error updating {noun}: {str(exc)}") from exc
+                    f"Error updating {noun}: {exc!s}") from exc
 
             old = self.old_item_from_exc(exc)
 

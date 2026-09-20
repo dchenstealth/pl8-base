@@ -3,14 +3,13 @@
 from .enums import IssueStatus
 from .events import (
     BaseEvent,
-    IssueNumActiveBlockersZeroed,
     IssueDeleted,
     IssueDone,
+    IssueNumActiveBlockersZeroed,
     IssueReady,
 )
-from .issue import IssueInfo, IssueBlocker
+from .issue import IssueBlocker, IssueInfo
 from .space import SpaceInfo
-
 
 CLASS_MAP = {
     "IssueInfo": IssueInfo,
@@ -25,11 +24,20 @@ EVENT_CLASS_MAP = {
     "IssueReady": IssueReady,
 }
 
+# Spelled out rather than unpacked from the maps above: a comprehension or
+# a *keys() splat is not statically readable, so type checkers and editors
+# cannot resolve what this package exports. The test suite asserts this list
+# and the two maps stay in agreement.
 __all__ = [
-    "IssueStatus",
     "CLASS_MAP",
     "EVENT_CLASS_MAP",
     "BaseEvent",
-    *CLASS_MAP.keys(),
-    *EVENT_CLASS_MAP.keys(),
+    "IssueBlocker",
+    "IssueDeleted",
+    "IssueDone",
+    "IssueInfo",
+    "IssueNumActiveBlockersZeroed",
+    "IssueReady",
+    "IssueStatus",
+    "SpaceInfo",
 ]

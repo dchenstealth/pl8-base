@@ -15,13 +15,11 @@ created, say, a Space would silently break the Issue counts.
 """
 
 import sys
-
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import boto3
 import pytest
-
 from aws_lambda_powertools import Logger
 from moto import mock_aws
 

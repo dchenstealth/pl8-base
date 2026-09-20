@@ -5,12 +5,13 @@ import functools
 import json
 import random
 import re
-import string
 import secrets
+import string
 import time
-
+from datetime import UTC, datetime
 from decimal import Decimal
-from datetime import datetime, UTC
+
+import msgspec
 
 from .const import (
     MAX_ISSUE_ID_LEN,
@@ -20,15 +21,12 @@ from .const import (
     TRANSACT_RETRY_BASE_DELAY,
     TRANSACT_RETRY_MAX_DELAY,
 )
-import msgspec
-
 from .errors import (
     DDBArgsError,
     DDBTransactionConflictError,
     EventCorruptedError,
     EventSendError,
 )
-
 
 # Defaults to [a-zA-Z0-9]
 DEFAULT_ID_ALPHABET = string.ascii_letters + string.digits
@@ -178,7 +176,7 @@ def encode_pagination_cursor(exclusive_start_key):
     try:
         json_bytes = json.dumps(exclusive_start_key).encode()
         return base64.urlsafe_b64encode(json_bytes).decode().rstrip("=")
-    except Exception:
+    except (TypeError, ValueError):
         raise DDBArgsError("Invalid exclusive start key")
 
 
@@ -204,7 +202,10 @@ def decode_pagination_cursor(cursor):
         # so put back however much this length implies before decoding.
         padded = cursor + "=" * (-len(cursor) % 4)
         decoded = json.loads(base64.urlsafe_b64decode(padded).decode())
-    except Exception:
+    except (TypeError, ValueError):
+        # binascii.Error, JSONDecodeError and UnicodeDecodeError all subclass
+        # ValueError; a non-string cursor fails the concatenation with a
+        # TypeError.
         raise DDBArgsError("Invalid pagination cursor")
 
     # An ExclusiveStartKey is a flat map of attr name to AttributeValue.
@@ -332,5 +333,6 @@ def parse_event(detail):
 
     try:
         return msgspec.convert(detail, event_cls)
-    except Exception as exc:
-        raise EventCorruptedError(f"Malformed event: {str(exc)}")
+    except (TypeError, ValueError) as exc:
+        # msgspec.ValidationError subclasses ValueError
+        raise EventCorruptedError(f"Malformed event: {exc!s}")

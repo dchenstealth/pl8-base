@@ -4,7 +4,6 @@ import json
 
 import boto3
 import pytest
-
 from moto import mock_aws
 
 from pl8_base.errors import EventCorruptedError, EventSendError

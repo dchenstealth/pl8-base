@@ -25,7 +25,6 @@ from ..util import (
     validate_space_id,
 )
 
-
 BLOCKER_SK_PREFIX = "800#BLOCKEDISSUE#"
 
 
@@ -164,7 +163,7 @@ class IssueMixin:
 
                 self.log_client_error(exc)
                 raise DDBInternalError(
-                    f"Error creating issue: {str(exc)}") from exc
+                    f"Error creating issue: {exc!s}") from exc
 
             return issue_info
 
@@ -382,7 +381,7 @@ class IssueMixin:
                     f"Issue not found: {space_id}#{issue_id}") from exc
 
             self.log_client_error(exc)
-            raise DDBInternalError(f"Error deleting issue: {str(exc)}") from exc
+            raise DDBInternalError(f"Error deleting issue: {exc!s}") from exc
 
     # ------------------------------------------------------------------
     # Issue blockers
@@ -485,7 +484,7 @@ class IssueMixin:
 
             self.log_client_error(exc)
             raise DDBInternalError(
-                f"Error adding issue blocker: {str(exc)}") from exc
+                f"Error adding issue blocker: {exc!s}") from exc
 
         return issue_blocker
 
@@ -546,7 +545,7 @@ class IssueMixin:
             if not failed:
                 self.log_client_error(exc)
                 raise DDBInternalError(
-                    f"Error deleting issue blocker: {str(exc)}") from exc
+                    f"Error deleting issue blocker: {exc!s}") from exc
 
         # The blocker is either already satisfied, in which case the counter
         # was decremented when the blocking Issue went DONE, or it is gone.
@@ -567,7 +566,7 @@ class IssueMixin:
 
             self.log_client_error(exc)
             raise DDBInternalError(
-                f"Error deleting issue blocker: {str(exc)}") from exc
+                f"Error deleting issue blocker: {exc!s}") from exc
 
     def active_blocker_delete(self, blocker_key):
         """Delete dict for an IssueBlocker that must still be active."""
@@ -724,7 +723,7 @@ class IssueMixin:
 
             self.log_client_error(exc)
             raise DDBInternalError(
-                f"Error deleting issue blocker: {str(exc)}") from exc
+                f"Error deleting issue blocker: {exc!s}") from exc
 
     def handle_issue_num_active_blockers_zeroed(self, *, space_id, issue_id):
         """Handle an Issue's last active blocker having cleared.
@@ -758,7 +757,7 @@ class IssueMixin:
                 return
 
             self.log_client_error(exc)
-            raise DDBInternalError(f"Error unblocking issue: {str(exc)}") from exc
+            raise DDBInternalError(f"Error unblocking issue: {exc!s}") from exc
 
     @retry_on_transaction_conflict()
     def apply_idempotent_transaction(self, items, message):
@@ -801,6 +800,6 @@ class IssueMixin:
                     return False
 
             self.log_client_error(exc)
-            raise DDBInternalError(f"{message}: {str(exc)}") from exc
+            raise DDBInternalError(f"{message}: {exc!s}") from exc
 
         return True

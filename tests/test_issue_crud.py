@@ -558,9 +558,9 @@ def issue_entry_points(mgr, space_id):
 class TestSpaceIdValidation:
     def test_every_entry_point_rejects_a_bad_space_id(self, mgr, subtests):
         for name, call in issue_entry_points(mgr, "ENG#OPS"):
-            with subtests.test(entry_point=name):
-                with pytest.raises(DDBArgsError):
-                    call()
+            with subtests.test(entry_point=name), \
+                    pytest.raises(DDBArgsError):
+                call()
 
     @pytest.mark.parametrize("space_id", BAD_SPACE_IDS)
     def test_create_issue_rejects_each_bad_form(self, mgr, space_id):

@@ -2,37 +2,30 @@
 
 class DDBError(Exception):
     """Base class for DDB Issues"""
-    pass
 
 
 class DDBInternalError(DDBError):
     """Raised for general service errors"""
-    pass
 
 
 class DDBCorruptedError(DDBInternalError):
     """Raised if data read from database is corrupted"""
-    pass
 
 
 class DDBMissingError(DDBError):
     """Raised when a requested item does not exist"""
-    pass
 
 
 class DDBExistsError(DDBError):
     """Raised when an item already exists"""
-    pass
 
 
 class DDBArgsError(DDBError):
     """Raised on invalid arguments passed in"""
-    pass
 
 
 class DDBIdCollisionError(DDBError):
     """Raised on ID collision after too many retries"""
-    pass
 
 
 class DDBTransactionConflictError(DDBError):
@@ -41,7 +34,6 @@ class DDBTransactionConflictError(DDBError):
     Transient contention. The same request may be retried unchanged; see
     util.retry_on_transaction_conflict.
     """
-    pass
 
 
 class DDBVersionConflictError(DDBError):
@@ -50,7 +42,6 @@ class DDBVersionConflictError(DDBError):
     The caller's view of the item is stale, so retrying the same request will
     fail again. The caller must re-read and reapply its change.
     """
-    pass
 
 
 class DDBTerminalStatusError(DDBError):
@@ -60,7 +51,6 @@ class DDBTerminalStatusError(DDBError):
     DONE is terminal; see types.enums.IssueStatus for why that rule is
     load-bearing beyond the product requirement.
     """
-    pass
 
 
 class DDBStillBlockedError(DDBError):
@@ -70,7 +60,6 @@ class DDBStillBlockedError(DDBError):
     The caller must delete the remaining IssueBlockers first, or wait for the
     blocking Issues to reach DONE.
     """
-    pass
 
 
 class DDBBlockingIssueDoneError(DDBError):
@@ -79,12 +68,10 @@ class DDBBlockingIssueDoneError(DDBError):
     A DONE Issue blocks nothing; the relationship would be created already
     satisfied.
     """
-    pass
 
 
 class EventError(Exception):
     """Base class for event issues"""
-    pass
 
 
 class EventSendError(EventError):
@@ -93,9 +80,7 @@ class EventSendError(EventError):
     Covers both a failed put_events call and a per-entry failure reported
     back with FailedEntryCount > 0.
     """
-    pass
 
 
 class EventCorruptedError(EventError):
     """Raised when an event's Detail is missing/unknown type, or malformed"""
-    pass

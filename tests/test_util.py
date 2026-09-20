@@ -2,8 +2,7 @@
 
 import base64
 import json
-
-from datetime import datetime, timedelta, timezone, UTC
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -41,7 +40,7 @@ class TestIsotime:
         assert result.endswith("Z")
         assert "+00:00" not in result
 
-        parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(result)
         # Truncation to milliseconds can put the parsed value a hair before
         # `before`, so allow that much slack on the lower bound.
         assert before - timedelta(milliseconds=1) <= parsed <= after
@@ -441,7 +440,7 @@ class TestRetryOnTransactionConflict:
         @retry_on_transaction_conflict()
         def some_operation():
             """Docstring."""
-            return None
+            return
 
         assert some_operation.__name__ == "some_operation"
         assert some_operation.__doc__ == "Docstring."

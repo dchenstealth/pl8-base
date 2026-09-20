@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: MIT
 
 import pytest
-
 from botocore.exceptions import ClientError
 
 from pl8_base.errors import (
@@ -9,7 +8,6 @@ from pl8_base.errors import (
     DDBMissingError,
 )
 from pl8_base.types import IssueBlocker, IssueInfo, IssueStatus
-
 
 INFO_PK = "ISSUE#ENG#abc123"
 INFO_SK = "100#INFO"

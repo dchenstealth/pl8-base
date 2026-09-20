@@ -81,7 +81,7 @@ class SpaceMixin:
                 raise DDBExistsError(f"Space exists: {space_id}") from exc
 
             self.log_client_error(exc)
-            raise DDBInternalError(f"Error creating space: {str(exc)}") from exc
+            raise DDBInternalError(f"Error creating space: {exc!s}") from exc
 
         return space_info
 
@@ -181,4 +181,4 @@ class SpaceMixin:
                 raise DDBMissingError(f"Space not found: {space_id}") from exc
 
             self.log_client_error(exc)
-            raise DDBInternalError(f"Error deleting space: {str(exc)}") from exc
+            raise DDBInternalError(f"Error deleting space: {exc!s}") from exc

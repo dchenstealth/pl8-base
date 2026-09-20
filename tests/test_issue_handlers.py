@@ -4,10 +4,14 @@ from types import SimpleNamespace
 
 import msgspec
 import pytest
-
 from botocore.exceptions import ClientError
 
-from pl8_base.errors import DDBMissingError, DDBTransactionConflictError
+from pl8_base.errors import (
+    DDBMissingError,
+    DDBStillBlockedError,
+    DDBTerminalStatusError,
+    DDBTransactionConflictError,
+)
 from pl8_base.types import IssueStatus
 
 
@@ -659,7 +663,7 @@ class TestTransactionConflicts:
         monkeypatch.setattr(mgr.dynamodb_client, "transact_write_items",
                             counting)
 
-        with pytest.raises(Exception):
+        with pytest.raises(DDBTerminalStatusError):
             mgr.add_issue_blocker(blocking_issue_space_id=ctv.space_id,
                                   blocking_issue_id=blocker.issue_id,
                                   blocked_issue_space_id=ctv.space_id,
@@ -788,7 +792,7 @@ class TestUnblockingFlows:
         block(b, a)
 
         for issue in (a, b):
-            with pytest.raises(Exception):
+            with pytest.raises(DDBStillBlockedError):
                 mgr.transition_issue(space_id=ctv.space_id,
                                      issue_id=issue.issue_id,
                                      status=IssueStatus.DONE)

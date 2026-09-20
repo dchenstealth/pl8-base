@@ -4,12 +4,13 @@ import gzip
 
 import msgspec
 import pytest
-
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 
+import pl8_base.types
 from pl8_base.errors import DDBArgsError
 from pl8_base.types import (
     CLASS_MAP,
+    EVENT_CLASS_MAP,
     IssueBlocker,
     IssueInfo,
     IssueStatus,
@@ -409,6 +410,30 @@ class TestClassMap:
         for obj in (make_info(), make_blocker(), make_space()):
             tag = obj.serialize(ts=ts)["type"]["S"]
             assert CLASS_MAP[tag] is type(obj)
+
+
+class TestPublicExports:
+    """__all__ is spelled out rather than unpacked from the maps, so that
+    type checkers and editors can resolve what the package exports. These
+    keep the hand-written list and the maps from drifting apart."""
+
+    def test_every_exported_name_resolves(self):
+        for name in pl8_base.types.__all__:
+            assert hasattr(pl8_base.types, name), name
+
+    def test_exports_every_mapped_class(self):
+        mapped = set(CLASS_MAP) | set(EVENT_CLASS_MAP)
+
+        assert mapped <= set(pl8_base.types.__all__)
+
+    def test_exports_nothing_beyond_the_maps_and_the_named_extras(self):
+        extras = {"CLASS_MAP", "EVENT_CLASS_MAP", "BaseEvent", "IssueStatus"}
+        mapped = set(CLASS_MAP) | set(EVENT_CLASS_MAP)
+
+        assert set(pl8_base.types.__all__) == mapped | extras
+
+    def test_has_no_duplicates(self):
+        assert len(pl8_base.types.__all__) == len(set(pl8_base.types.__all__))
 
 
 class TestBaseObjectContract:
