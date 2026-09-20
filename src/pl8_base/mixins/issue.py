@@ -21,6 +21,8 @@ from ..util import (
     gen_issue_id,
     isotime,
     retry_on_transaction_conflict,
+    validate_issue_status,
+    validate_space_id,
 )
 
 
@@ -39,6 +41,12 @@ class IssueMixin:
     must be idempotent and safe to apply late. Each gets both by conditioning
     on current item state rather than on a delta, so a duplicated or
     out-of-order event fails its condition and becomes a no-op.
+
+    Every public method validates its space_id before it reaches a key, the
+    same as SpaceMixin does. An Issue key composes ISSUE#{space_id}#{issue_id},
+    so a space_id carrying a "#" would alias one Issue onto another
+    (space_id, issue_id) pair; see util.validate_space_id. Validating is not a
+    Space existence check, which entities.md forbids requiring.
     """
 
     # ------------------------------------------------------------------
@@ -119,14 +127,19 @@ class IssueMixin:
             space_id (str): id of the issue's space
             title (str): issue title
             description (str): issue description
-            status (str): issue status
+            status (str or IssueStatus): issue status
 
         Returns: IssueInfo
 
         Raises:
+            DDBArgsError: if space_id or status is invalid, or description is
+                not a string
             DDBIdCollisionError: Collision error on issue_id
             DDBInternalError: internal database error
         """
+        validate_space_id(space_id)
+        status = validate_issue_status(status)
+
         for _ in range(RETRY_ISSUE_ID_COLLISIONS):
             issue_id = gen_issue_id()
             issue_info = IssueInfo(
@@ -158,10 +171,18 @@ class IssueMixin:
         raise DDBIdCollisionError(f"Issue ID collision after {RETRY_ISSUE_ID_COLLISIONS} tries")
 
     def get_issue(self, *, space_id, issue_id):
-        pk = IssueInfo.KEY_ATTRS["PK"].format(space_id=space_id,
-                                              issue_id=issue_id)
-        sk = IssueInfo.KEY_ATTRS["SK"]
-        return self.get_primary_item(PK=pk, SK=sk)
+        """Load one Issue.
+
+        Raises:
+            DDBArgsError: if space_id is invalid
+            DDBMissingError: if the Issue does not exist
+            DDBCorruptedError: if the item cannot be parsed
+            DDBInternalError: internal database error
+        """
+        validate_space_id(space_id)
+
+        return self.get_primary_item(PK=self.issue_pk(space_id, issue_id),
+                                     SK=IssueInfo.KEY_ATTRS["SK"])
 
     def get_issues_by_status(self, *, space_id, status, limit=50, cursor=None):
         """One page of Issues in a status, longest-in-status first.
@@ -171,7 +192,14 @@ class IssueMixin:
 
         Returns:
             tuple: (list[IssueInfo], str or None)
+
+        Raises:
+            DDBArgsError: if space_id or status is invalid
+            DDBInternalError: internal database error
         """
+        validate_space_id(space_id)
+        status = validate_issue_status(status)
+
         gsi1pk = IssueInfo.KEY_ATTRS["GSI1PK"].format(space_id=space_id,
                                                       status=status)
         return self.run_query({
@@ -195,7 +223,13 @@ class IssueMixin:
 
         Returns:
             tuple: (list[IssueBlocker], str or None)
+
+        Raises:
+            DDBArgsError: if space_id is invalid
+            DDBInternalError: internal database error
         """
+        validate_space_id(space_id)
+
         gsi1pk = IssueBlocker.KEY_ATTRS["GSI1PK"].format(
             blocked_issue_space_id=space_id,
             blocked_issue_id=blocked_issue_id)
@@ -216,7 +250,13 @@ class IssueMixin:
 
         Returns:
             tuple: (list[IssueBlocker], str or None)
+
+        Raises:
+            DDBArgsError: if space_id is invalid
+            DDBInternalError: internal database error
         """
+        validate_space_id(space_id)
+
         pk = IssueBlocker.KEY_ATTRS["PK"].format(
             blocking_issue_space_id=space_id,
             blocking_issue_id=blocking_issue_id)
@@ -243,10 +283,14 @@ class IssueMixin:
         Returns: IssueInfo
 
         Raises:
+            DDBArgsError: if space_id is invalid, or description is not a
+                string
             DDBMissingError: if the Issue does not exist
             DDBVersionConflictError: if version is set and did not match
             DDBInternalError: internal database error
         """
+        validate_space_id(space_id)
+
         update = self._build_update(
             PK=self.issue_pk(space_id, issue_id),
             SK=IssueInfo.KEY_ATTRS["SK"],
@@ -263,16 +307,20 @@ class IssueMixin:
         Args:
             space_id (str): id of the issue's space
             issue_id (str): id of the issue
-            status (str): status to move to
+            status (str or IssueStatus): status to move to
 
         Returns: IssueInfo
 
         Raises:
+            DDBArgsError: if space_id or status is invalid
             DDBMissingError: if the Issue does not exist
             DDBTerminalStatusError: if the Issue is DONE and would leave it
             DDBStillBlockedError: if the Issue still has active blockers
             DDBInternalError: internal database error
         """
+        validate_space_id(space_id)
+        status = validate_issue_status(status)
+
         # Moving to DONE from DONE is not a transition out of DONE, so the
         # terminal rule only applies to the other targets.
         excluded_vals = ({} if status == IssueStatus.DONE
@@ -311,9 +359,12 @@ class IssueMixin:
         the stream handler drives once this write lands.
 
         Raises:
+            DDBArgsError: if space_id is invalid
             DDBMissingError: if the Issue does not exist
             DDBInternalError: internal database error
         """
+        validate_space_id(space_id)
+
         try:
             self.dynamodb_client.delete_item(
                 TableName=self.table_name,
@@ -344,13 +395,17 @@ class IssueMixin:
         Returns: IssueBlocker
 
         Raises:
-            DDBArgsError: if the blocking and blocked issue are the same Issue
+            DDBArgsError: if either space_id is invalid, or the blocking and
+                blocked issue are the same Issue
             DDBMissingError: if either Issue does not exist
             DDBBlockingIssueDoneError: if the blocking Issue is DONE
             DDBTerminalStatusError: if the blocked Issue is DONE
             DDBExistsError: if the IssueBlocker already exists
             DDBTransactionConflictError: if every attempt conflicts
         """
+        validate_space_id(blocking_issue_space_id)
+        validate_space_id(blocked_issue_space_id)
+
         if (blocking_issue_space_id == blocked_issue_space_id
                 and blocking_issue_id == blocked_issue_id):
             raise DDBArgsError("Issue cannot block itself")
@@ -445,9 +500,13 @@ class IssueMixin:
         delete when its condition fails.
 
         Raises:
+            DDBArgsError: if either space_id is invalid
             DDBMissingError: if the IssueBlocker does not exist
             DDBTransactionConflictError: if every attempt conflicts
         """
+        validate_space_id(blocking_issue_space_id)
+        validate_space_id(blocked_issue_space_id)
+
         # Only the key matters here; is_blocking_issue_done is what the write
         # conditions on rather than what it carries.
         target = IssueBlocker(
@@ -532,7 +591,12 @@ class IssueMixin:
         Marks every IssueBlocker this Issue holds as satisfied and drops the
         blocked Issues' counters. Each write conditions on the state it
         expects, so a replayed or late event is a no-op.
+
+        Raises:
+            DDBArgsError: if space_id is invalid
         """
+        validate_space_id(space_id)
+
         for issue_blocker in self.paginate(self.get_issue_blocking,
                                            space_id=space_id,
                                            blocking_issue_id=issue_id):
@@ -585,7 +649,12 @@ class IssueMixin:
         No IssueBlocker may outlive either Issue it names, so both directions
         are swept. Delivery is at-least-once and unordered, so every write
         conditions on the state it expects and a duplicate event is a no-op.
+
+        Raises:
+            DDBArgsError: if space_id is invalid
         """
+        validate_space_id(space_id)
+
         # Phase 1, Issues this Issue was blocking. These rows live in this
         # Issue's own partition.
         for issue_blocker in self.paginate(self.get_issue_blocking,
@@ -647,7 +716,12 @@ class IssueMixin:
 
         Conditions on the Issue still being BLOCKED with no active blockers, so
         a replay, a late event, or one overtaken by a new blocker is a no-op.
+
+        Raises:
+            DDBArgsError: if space_id is invalid
         """
+        validate_space_id(space_id)
+
         update = self._build_update(
             PK=self.issue_pk(space_id, issue_id),
             SK=IssueInfo.KEY_ATTRS["SK"],

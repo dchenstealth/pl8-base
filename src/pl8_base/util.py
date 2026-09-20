@@ -115,6 +115,37 @@ def validate_space_id(space_id):
         raise DDBArgsError("Space ID has invalid characters")
 
 
+def validate_issue_status(status):
+    """
+    Coerce a caller-supplied status to an IssueStatus member.
+
+    msgspec Structs do not type check on direct instantiation, so nothing
+    downstream stops an arbitrary string from reaching IssueInfo.status and
+    the GSI1PK it composes. Such a row can no longer be read back, since
+    from_item does validate, so a bad argument would surface later as
+    DDBCorruptedError. Reject it here instead, while it is still an argument.
+
+    Imports IssueStatus from .types locally rather than at module level:
+    types/events.py imports isotime from this module, so a top-level import
+    here would be circular. Same reason as parse_event below.
+
+    Args:
+        status (str or IssueStatus): status to validate
+
+    Returns:
+        IssueStatus: the matching member
+
+    Raises:
+        DDBArgsError: if status is not one of the four IssueStatus values
+    """
+    from .types import IssueStatus
+
+    try:
+        return IssueStatus(status)
+    except ValueError:
+        raise DDBArgsError(f"Invalid issue status: {status!r}")
+
+
 def encode_pagination_cursor(exclusive_start_key):
     """
     Encode a pagination cursor from a DynamoDB ExclusiveStartKey.

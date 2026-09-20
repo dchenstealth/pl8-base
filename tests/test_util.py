@@ -18,6 +18,7 @@ from pl8_base.errors import (
     DDBTransactionConflictError,
     DDBVersionConflictError,
 )
+from pl8_base.types import IssueStatus
 from pl8_base.util import (
     DEFAULT_ID_ALPHABET,
     cleanup_decimals,
@@ -26,6 +27,7 @@ from pl8_base.util import (
     gen_issue_id,
     isotime,
     retry_on_transaction_conflict,
+    validate_issue_status,
     validate_space_id,
 )
 
@@ -192,6 +194,43 @@ class TestPaginationCursor:
     def test_encode_rejects_non_json_object(self):
         with pytest.raises(DDBArgsError, match="Invalid exclusive start key"):
             encode_pagination_cursor({"PK": object()})
+
+
+class TestValidateIssueStatus:
+    """msgspec Structs do not type check on __init__, so nothing below this
+    stops a bad status from reaching IssueInfo.status and the GSI1PK it
+    composes. That row could then never be read back; see
+    TestIssueStatusValidation in test_issue_crud.py."""
+
+    @pytest.mark.parametrize("status", list(IssueStatus))
+    def test_accepts_every_member(self, status):
+        assert validate_issue_status(status) is status
+
+    @pytest.mark.parametrize("status", ["TODO", "BLOCKED", "IN_PROGRESS",
+                                        "DONE"])
+    def test_accepts_the_bare_string_form(self, status):
+        assert validate_issue_status(status) == IssueStatus(status)
+
+    def test_returns_the_enum_member_not_the_string(self):
+        assert isinstance(validate_issue_status("TODO"), IssueStatus)
+
+    @pytest.mark.parametrize("status", [
+        "NOT_A_STATUS",
+        "todo",
+        "",
+        "TODO ",
+    ])
+    def test_rejects_an_unknown_value(self, status):
+        with pytest.raises(DDBArgsError, match="Invalid issue status"):
+            validate_issue_status(status)
+
+    # Whatever the caller passed, it comes back as a bad argument rather than
+    # a TypeError from inside the enum lookup.
+    @pytest.mark.parametrize("status", [None, 123, ["TODO"], {"TODO": 1},
+                                        object()])
+    def test_rejects_a_non_status_type(self, status):
+        with pytest.raises(DDBArgsError, match="Invalid issue status"):
+            validate_issue_status(status)
 
 
 class TestRetryOnTransactionConflict:

@@ -6,6 +6,8 @@ import pytest
 
 from pl8_base.const import RETRY_ISSUE_ID_COLLISIONS
 from pl8_base.errors import (
+    DDBArgsError,
+    DDBCorruptedError,
     DDBIdCollisionError,
     DDBMissingError,
     DDBStillBlockedError,
@@ -497,4 +499,183 @@ class TestDeleteIssue:
         mgr.delete_issue(space_id=ctv.space_id, issue_id=new_issue.issue_id)
 
         with pytest.raises(DDBMissingError):
+            mgr.get_issue(space_id=ctv.space_id, issue_id=new_issue.issue_id)
+
+
+# An Issue key composes ISSUE#{space_id}#{issue_id}, so an unvalidated
+# space_id carrying a "#" aliases one Issue onto another (space_id, issue_id)
+# pair. entities.md: a space id MUST be 1-64 characters of [A-Za-z0-9_-].
+BAD_SPACE_IDS = ["ENG#OPS", "", "ENG ONE", "ENG/x", "ENG\n", "x" * 65, None,
+                 123]
+
+
+def issue_entry_points(mgr, space_id):
+    """Every public IssueMixin call, bound to one space_id.
+
+    Listed exhaustively rather than sampled: a method added later without
+    validation should fail here rather than ship. Each entry is
+    (name, callable).
+    """
+    return [
+        ("create_issue", lambda: mgr.create_issue(
+            space_id=space_id, title="t", description="d",
+            status=IssueStatus.TODO)),
+        ("get_issue", lambda: mgr.get_issue(space_id=space_id, issue_id="abc")),
+        ("get_issues_by_status", lambda: mgr.get_issues_by_status(
+            space_id=space_id, status=IssueStatus.TODO)),
+        ("get_issue_blockers", lambda: mgr.get_issue_blockers(
+            space_id=space_id, blocked_issue_id="abc")),
+        ("get_issue_blocking", lambda: mgr.get_issue_blocking(
+            space_id=space_id, blocking_issue_id="abc")),
+        ("update_issue", lambda: mgr.update_issue(
+            space_id=space_id, issue_id="abc", title="t", description="d")),
+        ("transition_issue", lambda: mgr.transition_issue(
+            space_id=space_id, issue_id="abc", status=IssueStatus.DONE)),
+        ("delete_issue", lambda: mgr.delete_issue(
+            space_id=space_id, issue_id="abc")),
+        ("add_issue_blocker/blocking", lambda: mgr.add_issue_blocker(
+            blocking_issue_space_id=space_id, blocking_issue_id="a",
+            blocked_issue_space_id="OPS", blocked_issue_id="b")),
+        ("add_issue_blocker/blocked", lambda: mgr.add_issue_blocker(
+            blocking_issue_space_id="OPS", blocking_issue_id="a",
+            blocked_issue_space_id=space_id, blocked_issue_id="b")),
+        ("delete_issue_blocker/blocking", lambda: mgr.delete_issue_blocker(
+            blocking_issue_space_id=space_id, blocking_issue_id="a",
+            blocked_issue_space_id="OPS", blocked_issue_id="b")),
+        ("delete_issue_blocker/blocked", lambda: mgr.delete_issue_blocker(
+            blocking_issue_space_id="OPS", blocking_issue_id="a",
+            blocked_issue_space_id=space_id, blocked_issue_id="b")),
+        ("handle_issue_done", lambda: mgr.handle_issue_done(
+            space_id=space_id, issue_id="abc")),
+        ("handle_issue_deleted", lambda: mgr.handle_issue_deleted(
+            space_id=space_id, issue_id="abc")),
+        ("handle_issue_num_active_blockers_zeroed",
+         lambda: mgr.handle_issue_num_active_blockers_zeroed(
+             space_id=space_id, issue_id="abc")),
+    ]
+
+
+class TestSpaceIdValidation:
+    def test_every_entry_point_rejects_a_bad_space_id(self, mgr, subtests):
+        for name, call in issue_entry_points(mgr, "ENG#OPS"):
+            with subtests.test(entry_point=name):
+                with pytest.raises(DDBArgsError):
+                    call()
+
+    @pytest.mark.parametrize("space_id", BAD_SPACE_IDS)
+    def test_create_issue_rejects_each_bad_form(self, mgr, space_id):
+        with pytest.raises(DDBArgsError):
+            mgr.create_issue(space_id=space_id, title="t", description="d",
+                             status=IssueStatus.TODO)
+
+    def test_nothing_is_written_for_a_bad_space_id(self, mgr, scan_all):
+        for _, call in issue_entry_points(mgr, "ENG#OPS"):
+            with pytest.raises(DDBArgsError):
+                call()
+
+        assert scan_all() == []
+
+    def test_a_hash_cannot_alias_one_issue_onto_another(self, ctv, mgr,
+                                                        scan_all):
+        """The aliasing this validation exists to prevent.
+
+        Without it, create_issue(space_id="ENG#OPS") wrote
+        PK=ISSUE#ENG#OPS#<id>, which get_issue(space_id="ENG",
+        issue_id="OPS#<id>") then read back as a different Issue. Rejecting
+        the write is what makes the aliased read find nothing.
+        """
+        with pytest.raises(DDBArgsError):
+            mgr.create_issue(space_id=f"{ctv.space_id}#{ctv.other_space_id}",
+                             title="t", description="d",
+                             status=IssueStatus.TODO)
+
+        assert scan_all() == []
+
+        with pytest.raises(DDBMissingError):
+            mgr.get_issue(space_id=ctv.space_id,
+                          issue_id=f"{ctv.other_space_id}#abc123")
+
+    def test_valid_space_ids_still_work(self, mgr):
+        for space_id in ["ENG", "a", "my-space_1", "x" * 64]:
+            issue = mgr.create_issue(space_id=space_id, title="t",
+                                     description="d", status=IssueStatus.TODO)
+            assert mgr.get_issue(space_id=space_id,
+                                 issue_id=issue.issue_id) == issue
+
+
+class TestIssueStatusValidation:
+    """A bad status used to be written straight through to the row and its
+    GSI1PK. from_item does validate, so the row could then never be read
+    back: a bad argument surfaced later as DDBCorruptedError."""
+
+    @pytest.mark.parametrize("status", ["NOT_A_STATUS", "todo", "", None, 123])
+    def test_create_issue_rejects_it(self, ctv, mgr, status):
+        with pytest.raises(DDBArgsError, match="Invalid issue status"):
+            mgr.create_issue(space_id=ctv.space_id, title="t",
+                             description="d", status=status)
+
+    def test_create_issue_writes_no_row_for_a_bad_status(self, ctv, mgr,
+                                                         scan_all):
+        with pytest.raises(DDBArgsError):
+            mgr.create_issue(space_id=ctv.space_id, title="t",
+                             description="d", status="NOT_A_STATUS")
+
+        assert scan_all() == []
+
+    @pytest.mark.parametrize("status", ["NOT_A_STATUS", "todo", "", None, 123])
+    def test_transition_issue_rejects_it(self, ctv, mgr, new_issue, status):
+        with pytest.raises(DDBArgsError, match="Invalid issue status"):
+            mgr.transition_issue(space_id=ctv.space_id,
+                                 issue_id=new_issue.issue_id, status=status)
+
+    def test_transition_issue_leaves_the_row_untouched(self, ctv, mgr,
+                                                       new_issue):
+        with pytest.raises(DDBArgsError):
+            mgr.transition_issue(space_id=ctv.space_id,
+                                 issue_id=new_issue.issue_id,
+                                 status="NOT_A_STATUS")
+
+        assert mgr.get_issue(space_id=ctv.space_id,
+                             issue_id=new_issue.issue_id) == new_issue
+
+    def test_get_issues_by_status_rejects_it(self, ctv, mgr):
+        with pytest.raises(DDBArgsError, match="Invalid issue status"):
+            mgr.get_issues_by_status(space_id=ctv.space_id,
+                                     status="NOT_A_STATUS")
+
+    def test_a_created_issue_is_always_readable_back(self, ctv, mgr):
+        """The guarantee the validation buys: no write path can produce a row
+        that get_issue then reports as corrupt."""
+        for status in IssueStatus:
+            issue = mgr.create_issue(space_id=ctv.space_id, title="t",
+                                     description="d", status=status)
+            got = mgr.get_issue(space_id=ctv.space_id,
+                                issue_id=issue.issue_id)
+
+            assert got.status is status
+            assert isinstance(got.status, IssueStatus)
+
+    def test_the_bare_string_form_is_accepted_and_stored_as_the_enum(
+            self, ctv, mgr):
+        issue = mgr.create_issue(space_id=ctv.space_id, title="t",
+                                 description="d", status="IN_PROGRESS")
+
+        assert issue.status is IssueStatus.IN_PROGRESS
+        assert mgr.get_issue(space_id=ctv.space_id,
+                             issue_id=issue.issue_id).status \
+            is IssueStatus.IN_PROGRESS
+
+    def test_a_corrupt_status_still_reads_as_corrupt(self, ctv, mgr, new_issue,
+                                                     dynamodb_client):
+        """Validation fences the write path, not rows already in the table:
+        a status corrupted out of band is still reported as corruption."""
+        dynamodb_client.update_item(
+            TableName=ctv.table_name,
+            Key={"PK": {"S": new_issue.PK}, "SK": {"S": new_issue.SK}},
+            UpdateExpression="SET #s = :s",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":s": {"S": "NOT_A_STATUS"}},
+        )
+
+        with pytest.raises(DDBCorruptedError):
             mgr.get_issue(space_id=ctv.space_id, issue_id=new_issue.issue_id)
