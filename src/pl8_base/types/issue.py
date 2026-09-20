@@ -25,10 +25,10 @@ class IssueInfo(BaseObject):
     })
     COMPRESSED_ATTRS: ClassVar[set[str]] = {"description"}
 
-    PK: str = None
-    SK: str = None
-    GSI1PK: str = None
-    GSI1SK: str = None
+    PK: str | None = None
+    SK: str | None = None
+    GSI1PK: str | None = None
+    GSI1SK: str | None = None
     type_version: str = "0.0.1"
 
     issue_id: str
@@ -36,7 +36,7 @@ class IssueInfo(BaseObject):
     title: str
     description: str
     status: IssueStatus
-    status_updated_at: str = None
+    status_updated_at: str | None = None
 
     # The number of IssueBlockers blocking this Issue with is_blocking_issue_done=False
     # MUST be enforced atomically via transactions.
@@ -78,10 +78,10 @@ class IssueBlocker(BaseObject):
     })
     COMPRESSED_ATTRS: ClassVar[set[str]] = set()
 
-    PK: str = None
-    SK: str = None
-    GSI1PK: str = None
-    GSI1SK: str = None
+    PK: str | None = None
+    SK: str | None = None
+    GSI1PK: str | None = None
+    GSI1SK: str | None = None
     type_version: str = "0.0.1"
 
     blocking_issue_space_id: str

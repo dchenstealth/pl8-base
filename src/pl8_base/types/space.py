@@ -39,10 +39,10 @@ class SpaceInfo(BaseObject):
     })
     COMPRESSED_ATTRS: ClassVar[set[str]] = {"description"}
 
-    PK: str = None
-    SK: str = None
-    GSI1PK: str = None
-    GSI1SK: str = None
+    PK: str | None = None
+    SK: str | None = None
+    GSI1PK: str | None = None
+    GSI1SK: str | None = None
     type_version: str = "0.0.1"
 
     space_id: str

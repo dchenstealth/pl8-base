@@ -24,8 +24,10 @@ class BaseObject(msgspec.Struct, tag=True, tag_field="type",
     # SemVer string for type versioning, e.g. 0.0.1
     type_version: str
 
-    created_at: str = None
-    updated_at: str = None
+    # Resolved in __post_init__ when not supplied, so None only ever appears
+    # between __init__ and that call, never on a constructed object.
+    created_at: str | None = None
+    updated_at: str | None = None
     version: int = 1
 
     @property

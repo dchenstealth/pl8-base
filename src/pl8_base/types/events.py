@@ -21,8 +21,10 @@ class BaseEvent(msgspec.Struct, tag=True, tag_field="type",
     # SemVer string for type versioning, e.g. 0.0.1
     type_version: str
 
-    event_id: str = None
-    sent_at: str = None
+    # Resolved in __post_init__ when not supplied, so None only ever appears
+    # between __init__ and that call, never on a constructed event.
+    event_id: str | None = None
+    sent_at: str | None = None
 
     def __post_init__(self):
         if not self.event_id:
