@@ -73,10 +73,12 @@ class BaseObject(msgspec.Struct, tag=True, tag_field="type",
         # Initialize key attrs if not set on object.
         # Called when creating object; initializing from db object
         # directly sets key attrs.
+        # Rendered from one snapshot, so no key attr may be composed from
+        # another: a format string referencing PK would read the pre-init None.
+        fields = self.dict()
         for attr, format_str in self.KEY_ATTRS.items():
             if getattr(self, attr) is None:
-                val = format_str.format(**self.dict())
-                setattr(self, attr, val)
+                setattr(self, attr, format_str.format(**fields))
 
     def dict(self):
         return msgspec.to_builtins(self)
