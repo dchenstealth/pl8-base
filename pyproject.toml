@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Daniel Chen
+#
+# SPDX-License-Identifier: MIT
+
 [project]
 name = "pl8-base"
 version = "0.0.1"
@@ -6,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
-    { name = "Daniel Chen", email = "danieljnchen@gmail.com" }
+    { name = "Daniel Chen", email = "dchenstealth@gmail.com" }
 ]
 requires-python = ">=3.11"
 keywords = ["issue-tracker", "dynamodb", "aws", "lambda"]

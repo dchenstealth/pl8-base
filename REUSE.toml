@@ -1,0 +1,14 @@
+version = 1
+
+[[annotations]]
+path = [
+    ".gitattributes",
+    ".gitignore",
+    ".python-version",
+    "uv.lock",
+    "README.md",
+    "CONTRIBUTING.md",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Daniel Chen"
+SPDX-License-Identifier = "MIT"
