@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Daniel Chen
+#
+# SPDX-License-Identifier: MIT
+
 [project]
 name = "pl8-base"
 version = "0.0.1"

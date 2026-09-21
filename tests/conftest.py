@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Daniel Chen
+#
 # SPDX-License-Identifier: MIT
 
 """Shared fixtures for the pl8-base suite.
