@@ -18,6 +18,8 @@ TRANSACT_RETRY_MAX_DELAY = 1.0
 
 # CancellationReasons code marking a transient transaction conflict
 TRANSACT_CONFLICT_REASON = "TransactionConflict"
+# Error code a single-item write raises when a transaction holds its item
+TRANSACT_CONFLICT_CODE = "TransactionConflictException"
 # CancellationReasons code marking a failed ConditionExpression
 CONDITION_FAILED_REASON = "ConditionalCheckFailed"
 # Error code a failed ConditionExpression raises outside a transaction

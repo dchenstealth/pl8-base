@@ -627,28 +627,55 @@ class TestTransactionConflicts:
             mgr.handle_issue_done(space_id=ctv.space_id,
                                   issue_id=blocker.issue_id)
 
-    def test_single_item_handler_writes_are_not_transactions(self, ctv, mgr,
-                                                             make_issue, block,
-                                                             monkeypatch):
-        # handle_issue_num_active_blockers_zeroed updates one item, so it
-        # cannot raise TransactionConflict and needs no retry of its own.
+    def test_single_item_handler_write_retries_a_held_row(
+            self, ctv, mgr, make_issue, block, hold_by_transaction):
+        # handle_issue_num_active_blockers_zeroed updates one item, but a
+        # transaction holding that item (add_issue_blocker's, say) still
+        # rejects it, as TransactionConflictException.
         blocker = make_issue("blocker")
         blocked = make_issue("blocked")
         block(blocker, blocked)
         mgr.transition_issue(space_id=ctv.space_id, issue_id=blocker.issue_id,
                              status=IssueStatus.DONE)
         mgr.handle_issue_done(space_id=ctv.space_id, issue_id=blocker.issue_id)
-
-        def fail_if_called(**kwargs):
-            raise AssertionError("expected a plain UpdateItem")
-
-        monkeypatch.setattr(mgr.dynamodb_client, "transact_write_items",
-                            fail_if_called)
+        calls = hold_by_transaction("update_item")
 
         mgr.handle_issue_num_active_blockers_zeroed(
             space_id=ctv.space_id, issue_id=blocked.issue_id)
 
+        assert len(calls) == 2
         assert reload(mgr, ctv, blocked).status == IssueStatus.TODO
+
+    def test_single_item_handler_write_gives_up_after_repeated_conflicts(
+            self, ctv, mgr, make_issue, block, hold_by_transaction):
+        blocker = make_issue("blocker")
+        blocked = make_issue("blocked")
+        block(blocker, blocked)
+        mgr.transition_issue(space_id=ctv.space_id, issue_id=blocker.issue_id,
+                             status=IssueStatus.DONE)
+        mgr.handle_issue_done(space_id=ctv.space_id, issue_id=blocker.issue_id)
+        hold_by_transaction("update_item", times=float("inf"))
+
+        with pytest.raises(DDBTransactionConflictError):
+            mgr.handle_issue_num_active_blockers_zeroed(
+                space_id=ctv.space_id, issue_id=blocked.issue_id)
+
+    def test_inbound_sweep_retries_a_held_row(self, ctv, mgr, make_issue,
+                                              block, get_raw,
+                                              hold_by_transaction):
+        subject = make_issue("subject")
+        upstream = make_issue("upstream")
+        block(upstream, subject)
+        mgr.delete_issue(space_id=ctv.space_id, issue_id=subject.issue_id)
+        calls = hold_by_transaction("delete_item")
+
+        mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                 issue_id=subject.issue_id)
+
+        pk = f"ISSUE#{ctv.space_id}#{upstream.issue_id}"
+        sk = f"800#BLOCKEDISSUE#{ctv.space_id}#{subject.issue_id}"
+        assert len(calls) == 2
+        assert get_raw(pk, sk) is None
 
     def test_a_condition_failure_is_not_retried(self, ctv, mgr, make_issue,
                                                 monkeypatch):

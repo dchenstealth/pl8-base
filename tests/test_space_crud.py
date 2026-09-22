@@ -20,6 +20,7 @@ from pl8_base.errors import (
     DDBExistsError,
     DDBMissingError,
     DDBSpaceNotEmptyError,
+    DDBTransactionConflictError,
     DDBVersionConflictError,
 )
 from pl8_base.types import IssueStatus
@@ -483,6 +484,44 @@ class TestSpaceIssueIntegrity:
 
         assert updated.name == "New"
         assert updated.issue_count == 1
+
+    def test_a_create_held_by_an_issue_transaction_is_retried(
+            self, ctv, mgr, hold_by_transaction):
+        # create_issue's transaction locks the Space key even while no Space
+        # exists there.
+        calls = hold_by_transaction("put_item")
+
+        mgr.create_space(space_id=ctv.space_id, name="n", description="d")
+
+        assert len(calls) == 2
+        assert mgr.get_space(space_id=ctv.space_id).name == "n"
+
+    @pytest.mark.parametrize("op", ["update_item", "delete_item"])
+    def test_a_write_held_by_an_issue_transaction_is_retried(
+            self, ctv, mgr, new_space, hold_by_transaction, op):
+        calls = hold_by_transaction(op)
+
+        if op == "update_item":
+            assert mgr.update_space(space_id=ctv.space_id, name="New",
+                                    description="d").name == "New"
+        else:
+            mgr.delete_space(space_id=ctv.space_id)
+            with pytest.raises(DDBMissingError):
+                mgr.get_space(space_id=ctv.space_id)
+
+        assert len(calls) == 2
+
+    @pytest.mark.parametrize("op", ["update_item", "delete_item"])
+    def test_a_write_held_on_every_attempt_raises_conflict(
+            self, ctv, mgr, new_space, hold_by_transaction, op):
+        hold_by_transaction(op, times=float("inf"))
+
+        with pytest.raises(DDBTransactionConflictError):
+            if op == "update_item":
+                mgr.update_space(space_id=ctv.space_id, name="New",
+                                 description="d")
+            else:
+                mgr.delete_space(space_id=ctv.space_id)
 
     def test_a_space_and_an_issue_occupy_separate_partitions(self, ctv, mgr,
                                                              new_space,

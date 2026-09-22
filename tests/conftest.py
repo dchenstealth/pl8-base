@@ -25,6 +25,7 @@ from types import SimpleNamespace
 import boto3
 import pytest
 from aws_lambda_powertools import Logger
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from pl8_base.manager import BasePL8
@@ -203,3 +204,34 @@ def scan_issue_rows(scan_all):
                 if item["type"] != {"S": "SpaceInfo"}]
 
     return _scan_issue_rows
+
+
+@pytest.fixture
+def hold_by_transaction(mgr, monkeypatch):
+    """Make a single-item write fail as if a transaction held its item.
+
+    hold_by_transaction(op, times) patches the client's op ("put_item",
+    "update_item" or "delete_item") so its first times calls raise the
+    TransactionConflictException DynamoDB returns in that case, then pass
+    through. Retry backoff is skipped. Returns the list of calls made.
+    """
+    monkeypatch.setattr("pl8_base.util.time.sleep", lambda _: None)
+
+    def _hold(op, times=1):
+        real = getattr(mgr.dynamodb_client, op)
+        calls = []
+
+        def _held(**kwargs):
+            calls.append(1)
+            if len(calls) <= times:
+                raise ClientError(
+                    {"Error": {"Code": "TransactionConflictException",
+                               "Message": "Transaction in progress"}},
+                    op,
+                )
+            return real(**kwargs)
+
+        monkeypatch.setattr(mgr.dynamodb_client, op, _held)
+        return calls
+
+    return _hold

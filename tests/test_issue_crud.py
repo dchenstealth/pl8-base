@@ -15,6 +15,7 @@ from pl8_base.errors import (
     DDBMissingError,
     DDBStillBlockedError,
     DDBTerminalStatusError,
+    DDBTransactionConflictError,
     DDBVersionConflictError,
 )
 from pl8_base.types import IssueStatus
@@ -279,7 +280,44 @@ class TestUpdateIssue:
                              title="t", description="d", version=1)
 
 
+    def test_a_write_held_by_a_transaction_is_retried(
+            self, ctv, mgr, new_issue, hold_by_transaction):
+        calls = hold_by_transaction("update_item")
+
+        updated = mgr.update_issue(space_id=ctv.space_id,
+                                   issue_id=new_issue.issue_id,
+                                   title="new title", description="d",
+                                   version=new_issue.version)
+
+        assert len(calls) == 2
+        assert updated.title == "new title"
+        assert updated.version == new_issue.version + 1
+
+    def test_a_write_held_on_every_attempt_raises_conflict(
+            self, ctv, mgr, new_issue, hold_by_transaction):
+        hold_by_transaction("update_item", times=float("inf"))
+
+        with pytest.raises(DDBTransactionConflictError):
+            mgr.update_issue(space_id=ctv.space_id,
+                             issue_id=new_issue.issue_id,
+                             title="new title", description="d")
+
+
 class TestTransitionIssue:
+    def test_a_write_held_by_a_transaction_is_retried(
+            self, ctv, mgr, new_issue, hold_by_transaction):
+        # add_issue_blocker's transaction holds the blocked Issue's row.
+        calls = hold_by_transaction("update_item")
+
+        moved = mgr.transition_issue(space_id=ctv.space_id,
+                                     issue_id=new_issue.issue_id,
+                                     status=IssueStatus.IN_PROGRESS,
+                                     version=new_issue.version)
+
+        assert len(calls) == 2
+        assert moved.status == IssueStatus.IN_PROGRESS
+        assert moved.version == new_issue.version + 1
+
     def test_changes_status(self, ctv, mgr, new_issue):
         mgr.transition_issue(space_id=ctv.space_id,
                              issue_id=new_issue.issue_id,

@@ -381,6 +381,25 @@ class TestDeleteIssueBlocker:
         assert get_raw(pk, sk) is None
         assert reload(mgr, ctv, blocked).num_active_blockers == 0
 
+    def test_satisfied_blocker_delete_retries_a_held_row(
+            self, ctv, mgr, make_issue, block, unblock, satisfy, get_raw,
+            hold_by_transaction):
+        # The fallback delete is a single-item write, so contention reaches it
+        # as TransactionConflictException rather than a cancelled transaction.
+        blocker = make_issue("blocker")
+        blocked = make_issue("blocked")
+        block(blocker, blocked)
+        satisfy(blocker)
+        calls = hold_by_transaction("delete_item")
+
+        unblock(blocker, blocked)
+
+        pk = f"ISSUE#{ctv.space_id}#{blocker.issue_id}"
+        sk = f"800#BLOCKEDISSUE#{ctv.space_id}#{blocked.issue_id}"
+        assert len(calls) == 2
+        assert get_raw(pk, sk) is None
+        assert reload(mgr, ctv, blocked).num_active_blockers == 0
+
     def test_satisfied_blocker_removal_with_another_active(self, ctv, mgr,
                                                            make_issue, block,
                                                            unblock, satisfy):

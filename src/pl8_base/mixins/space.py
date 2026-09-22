@@ -12,7 +12,7 @@ from ..errors import (
     DDBSpaceNotEmptyError,
 )
 from ..types import SpaceInfo
-from ..util import validate_space_id
+from ..util import retry_on_transaction_conflict, validate_space_id
 
 
 class SpaceMixin:
@@ -69,18 +69,20 @@ class SpaceMixin:
             "ExpressionAttributeValues": {
                 ":delta": self.serialize_value(delta),
             },
-            "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
         }
 
     # ------------------------------------------------------------------
     # Space CRUD
     # ------------------------------------------------------------------
 
+    @retry_on_transaction_conflict()
     def create_space(self, *, space_id, name, description):
         """Create a Space.
 
         No id collision retry, unlike create_issue: the id is the caller's, so a
-        clash is a conflict to report rather than something to reroll past.
+        clash is a conflict to report rather than something to reroll past. A
+        transaction conflict is retried: create_issue locks the Space key even
+        while no Space exists there.
 
         Args:
             space_id (str): caller-supplied id of the space
@@ -92,6 +94,7 @@ class SpaceMixin:
         Raises:
             DDBArgsError: if space_id is invalid, or description is not a string
             DDBExistsError: if the Space already exists
+            DDBTransactionConflictError: if every attempt conflicts
             DDBInternalError: internal database error
         """
         validate_space_id(space_id)
@@ -110,6 +113,8 @@ class SpaceMixin:
                 ExpressionAttributeNames={"#PK": "PK"},
             )
         except ClientError as exc:
+            self.raise_for_transaction_conflict(exc)
+
             if self.is_condition_failure(exc):
                 raise DDBExistsError(f"Space exists: {space_id}") from exc
 
@@ -155,11 +160,15 @@ class SpaceMixin:
             "ScanIndexForward": True,
         }, cursor=cursor, limit=limit)
 
+    @retry_on_transaction_conflict()
     def update_space(self, *, space_id, name, description, version=None):
         """Update a Space's name and description.
 
         No classify hook: a Space carries no domain conditions, so a failed
         condition can only mean the row is gone or the version is stale.
+
+        Issue creates and deletes hold the Space row in a transaction, and a
+        write landing meanwhile is rejected; that conflict is retried.
 
         Args:
             space_id (str): id of the space
@@ -173,6 +182,7 @@ class SpaceMixin:
             DDBArgsError: if space_id is invalid, or description is not a string
             DDBMissingError: if the Space does not exist
             DDBVersionConflictError: if version is set and did not match
+            DDBTransactionConflictError: if every attempt conflicts
             DDBInternalError: internal database error
         """
         validate_space_id(space_id)
@@ -188,18 +198,22 @@ class SpaceMixin:
                                  version=version,
                                  log_context={"space_id": space_id})
 
+    @retry_on_transaction_conflict()
     def delete_space(self, *, space_id):
         """Delete a Space's info row.
 
         Refused while the Space has any Issues, whatever their status. The
         check is issue_count rather than a query, so it is atomic with the
         delete: an Issue created concurrently either lands first and fails the
-        condition, or finds the Space gone and fails its own.
+        condition, or finds the Space gone and fails its own. If the create's
+        transaction is still in flight the delete is rejected as a conflict
+        and retried.
 
         Raises:
             DDBArgsError: if space_id is invalid
             DDBMissingError: if the Space does not exist
             DDBSpaceNotEmptyError: if the Space still has Issues
+            DDBTransactionConflictError: if every attempt conflicts
             DDBInternalError: internal database error
         """
         validate_space_id(space_id)
@@ -217,6 +231,8 @@ class SpaceMixin:
                 ReturnValuesOnConditionCheckFailure="ALL_OLD",
             )
         except ClientError as exc:
+            self.raise_for_transaction_conflict(exc)
+
             if self.is_condition_failure(exc):
                 old = self.old_item_from_exc(exc)
                 if old is None:
