@@ -11,9 +11,11 @@ look like. test_manager.py's put_raw is the deliberate exception: it exists for
 the corruption cases the API cannot produce.
 
 Only cross-entity fixtures belong here. Anything specific to one entity stays
-local to its own test module, and in particular nothing here may write a row:
-several tests assert exact table contents through scan_all(), so a fixture that
-created, say, a Space would silently break the Issue counts.
+local to its own test module, and in particular nothing here may write a row
+unless a test opts into it: several tests assert exact table contents through
+scan_all(), so an implicit write would silently break those counts. spaces is
+the one writing fixture, requested explicitly by the modules whose Issues need
+a Space to exist; they count rows with scan_issue_rows() instead.
 """
 
 import sys
@@ -23,6 +25,7 @@ from types import SimpleNamespace
 import boto3
 import pytest
 from aws_lambda_powertools import Logger
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from pl8_base.manager import BasePL8
@@ -179,3 +182,56 @@ def scan_all(ctv, dynamodb_client):
             params["ExclusiveStartKey"] = last_key
 
     return _scan_all
+
+
+@pytest.fixture
+def spaces(ctv, mgr):
+    """The ctv.space_id and ctv.other_space_id Spaces, which create_issue
+    requires to exist.
+
+    Opt-in rather than autouse, since it writes rows; see the module docstring.
+    """
+    return [mgr.create_space(space_id=space_id, name=space_id,
+                             description="d")
+            for space_id in (ctv.space_id, ctv.other_space_id)]
+
+
+@pytest.fixture
+def scan_issue_rows(scan_all):
+    """Every row except SpaceInfo, for row counts in modules using spaces."""
+    def _scan_issue_rows():
+        return [item for item in scan_all()
+                if item["type"] != {"S": "SpaceInfo"}]
+
+    return _scan_issue_rows
+
+
+@pytest.fixture
+def hold_by_transaction(mgr, monkeypatch):
+    """Make a single-item write fail as if a transaction held its item.
+
+    hold_by_transaction(op, times) patches the client's op ("put_item",
+    "update_item" or "delete_item") so its first times calls raise the
+    TransactionConflictException DynamoDB returns in that case, then pass
+    through. Retry backoff is skipped. Returns the list of calls made.
+    """
+    monkeypatch.setattr("pl8_base.util.time.sleep", lambda _: None)
+
+    def _hold(op, times=1):
+        real = getattr(mgr.dynamodb_client, op)
+        calls = []
+
+        def _held(**kwargs):
+            calls.append(1)
+            if len(calls) <= times:
+                raise ClientError(
+                    {"Error": {"Code": "TransactionConflictException",
+                               "Message": "Transaction in progress"}},
+                    op,
+                )
+            return real(**kwargs)
+
+        monkeypatch.setattr(mgr.dynamodb_client, op, _held)
+        return calls
+
+    return _hold

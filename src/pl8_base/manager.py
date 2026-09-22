@@ -9,6 +9,7 @@ from botocore.exceptions import ClientError
 from .const import (
     CONDITION_FAILED_CODE,
     CONDITION_FAILED_REASON,
+    TRANSACT_CONFLICT_CODE,
     TRANSACT_CONFLICT_REASON,
 )
 from .errors import (
@@ -144,18 +145,23 @@ class BasePL8(IssueMixin, SpaceMixin):
         return exc.response.get("CancellationReasons") or []
 
     def raise_for_transaction_conflict(self, exc):
-        """Re-raise a cancelled transaction as DDBTransactionConflictError.
+        """Re-raise transaction contention as DDBTransactionConflictError.
 
-        Contention is transient and the same request may be retried unchanged;
-        see util.retry_on_transaction_conflict. Returns without raising if the
-        cancellation was for some other reason.
+        Covers both shapes contention takes: a cancelled transaction with a
+        conflicting item, and a single-item write rejected because a
+        transaction held its item. Contention is transient and the same request
+        may be retried unchanged; see util.retry_on_transaction_conflict.
+        Returns without raising if the error was for some other reason.
 
         Args:
-            exc (ClientError): a TransactionCanceledException
+            exc (ClientError): error from any write
 
         Raises:
-            DDBTransactionConflictError: if any item reports a conflict
+            DDBTransactionConflictError: if the write hit contention
         """
+        if exc.response["Error"]["Code"] == TRANSACT_CONFLICT_CODE:
+            raise DDBTransactionConflictError("Transaction conflict") from exc
+
         for reason in self.cancellation_reasons(exc):
             if reason.get("Code") == TRANSACT_CONFLICT_REASON:
                 raise DDBTransactionConflictError(
@@ -381,6 +387,7 @@ class BasePL8(IssueMixin, SpaceMixin):
         Raises:
             DDBMissingError: if the item does not exist
             DDBVersionConflictError: if version is set and did not match
+            DDBTransactionConflictError: if a transaction held the item
             DDBInternalError: internal database error
         """
         noun = entity.lower()
@@ -389,6 +396,8 @@ class BasePL8(IssueMixin, SpaceMixin):
             resp = self.dynamodb_client.update_item(**update,
                                                     ReturnValues="ALL_NEW")
         except ClientError as exc:
+            self.raise_for_transaction_conflict(exc)
+
             if not self.is_condition_failure(exc):
                 self.log_client_error(exc)
                 raise DDBInternalError(

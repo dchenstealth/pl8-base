@@ -29,9 +29,12 @@ class SpaceInfo(BaseObject):
     letter, so a later SPACEMEMBER#... group would still land contiguous and
     after these without a retrofit.
 
-    A Space holds no referential integrity over its Issues. An Issue may name a
-    Space that does not exist, and deleting a Space leaves its Issues in place;
-    see mixins/space.py.
+    issue_count is how a Space holds referential integrity over its Issues.
+    create_issue and delete_issue adjust it in the same transaction as the Issue
+    write, which is also what refuses an Issue whose Space does not exist, and
+    delete_space conditions on it being 0. It is bookkeeping rather than a
+    consumer edit, so maintaining it leaves version and updated_at alone; see
+    mixins/space.py.
     """
     KEY_ATTRS: ClassVar[MappingProxyType] = MappingProxyType({
         "PK": "SPACE#{space_id}",
@@ -50,3 +53,4 @@ class SpaceInfo(BaseObject):
     space_id: str
     name: str
     description: str
+    issue_count: int = 0

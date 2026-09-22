@@ -4,7 +4,7 @@
 
 [project]
 name = "pl8-base"
-version = "0.0.3"
+version = "0.0.4"
 description = "PL8, a lightweight issue tracker backed by DynamoDB"
 readme = "README.md"
 license = "MIT"

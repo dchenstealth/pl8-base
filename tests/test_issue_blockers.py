@@ -13,6 +13,8 @@ from pl8_base.errors import (
 )
 from pl8_base.types import IssueStatus
 
+pytestmark = pytest.mark.usefixtures("spaces")
+
 
 @pytest.fixture
 def make_issue(ctv, mgr):
@@ -152,20 +154,20 @@ class TestAddIssueBlocker:
             block(blocker, blocked)
 
     def test_duplicate_does_not_move_the_counter(self, ctv, mgr, make_issue,
-                                                 block, scan_all):
+                                                 block, scan_issue_rows):
         # The whole point of doing this in a transaction: a rejected Put must
         # not leave an incremented counter behind.
         blocker = make_issue("blocker")
         blocked = make_issue("blocked")
         block(blocker, blocked)
 
-        rows_before = len(scan_all())
+        rows_before = len(scan_issue_rows())
 
         with pytest.raises(DDBExistsError):
             block(blocker, blocked)
 
         assert reload(mgr, ctv, blocked).num_active_blockers == 1
-        assert len(scan_all()) == rows_before
+        assert len(scan_issue_rows()) == rows_before
 
     def test_done_blocking_issue_is_rejected(self, ctv, mgr, make_issue, block):
         # entities.md: "An IssueBlocker MUST NOT name an Issue with status DONE
@@ -177,10 +179,10 @@ class TestAddIssueBlocker:
             block(blocker, blocked)
 
     def test_done_blocking_issue_writes_nothing(self, ctv, mgr, make_issue,
-                                                block, scan_all):
+                                                block, scan_issue_rows):
         blocker = make_issue("blocker", status=IssueStatus.DONE)
         blocked = make_issue("blocked")
-        rows_before = len(scan_all())
+        rows_before = len(scan_issue_rows())
 
         with pytest.raises(DDBBlockingIssueDoneError):
             block(blocker, blocked)
@@ -188,24 +190,24 @@ class TestAddIssueBlocker:
         loaded = reload(mgr, ctv, blocked)
         assert loaded.status == IssueStatus.TODO
         assert loaded.num_active_blockers == 0
-        assert len(scan_all()) == rows_before
+        assert len(scan_issue_rows()) == rows_before
 
     def test_done_blocked_issue_is_rejected(self, ctv, mgr, make_issue, block,
-                                            scan_all):
+                                            scan_issue_rows):
         blocker = make_issue("blocker")
         blocked = make_issue("blocked", status=IssueStatus.DONE)
-        rows_before = len(scan_all())
+        rows_before = len(scan_issue_rows())
 
         with pytest.raises(DDBTerminalStatusError):
             block(blocker, blocked)
 
         assert reload(mgr, ctv, blocked).status == IssueStatus.DONE
-        assert len(scan_all()) == rows_before
+        assert len(scan_issue_rows()) == rows_before
 
     def test_missing_blocking_issue_is_rejected(self, ctv, mgr, make_issue,
-                                                scan_all):
+                                                scan_issue_rows):
         blocked = make_issue("blocked")
-        rows_before = len(scan_all())
+        rows_before = len(scan_issue_rows())
 
         with pytest.raises(DDBMissingError):
             mgr.add_issue_blocker(blocking_issue_space_id=ctv.space_id,
@@ -214,12 +216,12 @@ class TestAddIssueBlocker:
                                   blocked_issue_id=blocked.issue_id)
 
         assert reload(mgr, ctv, blocked).num_active_blockers == 0
-        assert len(scan_all()) == rows_before
+        assert len(scan_issue_rows()) == rows_before
 
     def test_missing_blocked_issue_is_rejected(self, ctv, mgr, make_issue,
-                                               scan_all):
+                                               scan_issue_rows):
         blocker = make_issue("blocker")
-        rows_before = len(scan_all())
+        rows_before = len(scan_issue_rows())
 
         with pytest.raises(DDBMissingError):
             mgr.add_issue_blocker(blocking_issue_space_id=ctv.space_id,
@@ -227,7 +229,7 @@ class TestAddIssueBlocker:
                                   blocked_issue_space_id=ctv.space_id,
                                   blocked_issue_id="nope00")
 
-        assert len(scan_all()) == rows_before
+        assert len(scan_issue_rows()) == rows_before
 
     def test_self_block_is_rejected(self, ctv, mgr, make_issue):
         # entities.md: "An IssueBlocker MUST NOT name the same Issue as both
@@ -241,9 +243,9 @@ class TestAddIssueBlocker:
                                   blocked_issue_id=issue.issue_id)
 
     def test_self_block_check_does_not_touch_the_table(self, ctv, mgr,
-                                                       make_issue, scan_all):
+                                                       make_issue, scan_issue_rows):
         issue = make_issue("issue")
-        rows_before = len(scan_all())
+        rows_before = len(scan_issue_rows())
 
         with pytest.raises(DDBArgsError):
             mgr.add_issue_blocker(blocking_issue_space_id=ctv.space_id,
@@ -251,7 +253,7 @@ class TestAddIssueBlocker:
                                   blocked_issue_space_id=ctv.space_id,
                                   blocked_issue_id=issue.issue_id)
 
-        assert len(scan_all()) == rows_before
+        assert len(scan_issue_rows()) == rows_before
         assert reload(mgr, ctv, issue).status == IssueStatus.TODO
 
     def test_same_id_across_spaces_is_not_a_self_block(self, ctv, mgr,
@@ -376,6 +378,25 @@ class TestDeleteIssueBlocker:
 
         pk = f"ISSUE#{ctv.space_id}#{blocker.issue_id}"
         sk = f"800#BLOCKEDISSUE#{ctv.space_id}#{blocked.issue_id}"
+        assert get_raw(pk, sk) is None
+        assert reload(mgr, ctv, blocked).num_active_blockers == 0
+
+    def test_satisfied_blocker_delete_retries_a_held_row(
+            self, ctv, mgr, make_issue, block, unblock, satisfy, get_raw,
+            hold_by_transaction):
+        # The fallback delete is a single-item write, so contention reaches it
+        # as TransactionConflictException rather than a cancelled transaction.
+        blocker = make_issue("blocker")
+        blocked = make_issue("blocked")
+        block(blocker, blocked)
+        satisfy(blocker)
+        calls = hold_by_transaction("delete_item")
+
+        unblock(blocker, blocked)
+
+        pk = f"ISSUE#{ctv.space_id}#{blocker.issue_id}"
+        sk = f"800#BLOCKEDISSUE#{ctv.space_id}#{blocked.issue_id}"
+        assert len(calls) == 2
         assert get_raw(pk, sk) is None
         assert reload(mgr, ctv, blocked).num_active_blockers == 0
 

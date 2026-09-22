@@ -4,11 +4,10 @@
 
 """Space CRUD and enumeration.
 
-A Space stores Space metadata and makes every space id enumerable. It holds no
-referential integrity over Issues in either direction: an Issue may name a Space
-that was never created, and deleting a Space leaves its Issues in place. That
-contract is enforced at the caller level, and TestSpaceIssueIndependence is what
-keeps it from being tightened here by accident.
+A Space stores Space metadata and makes every space id enumerable. Its
+issue_count holds referential integrity over its Issues: an Issue cannot be
+created in a missing Space, and a Space cannot be deleted while it has Issues.
+TestSpaceIssueIntegrity is what keeps that contract from loosening.
 """
 
 import gzip
@@ -20,6 +19,8 @@ from pl8_base.errors import (
     DDBArgsError,
     DDBExistsError,
     DDBMissingError,
+    DDBSpaceNotEmptyError,
+    DDBTransactionConflictError,
     DDBVersionConflictError,
 )
 from pl8_base.types import IssueStatus
@@ -397,60 +398,146 @@ class TestDeleteSpace:
             mgr.delete_space(ctv.space_id)
 
 
-class TestSpaceIssueIndependence:
-    """Spaces and Issues do not constrain each other.
+class TestSpaceIssueIntegrity:
+    """A Space's issue_count is what ties it to its Issues.
 
-    Referential integrity is the caller's job. These are the tests that keep
-    this library from quietly acquiring it.
+    An Issue cannot be created in a missing Space, and a Space cannot be
+    deleted while it has Issues, whatever their status.
     """
 
-    def test_an_issue_needs_no_space(self, mgr, scan_all):
-        issue = mgr.create_issue(space_id="NOSUCH", title="t", description="d",
-                                 status=IssueStatus.TODO)
+    @pytest.fixture
+    def make_issue(self, ctv, mgr):
+        def _make_issue(space_id=None, status=IssueStatus.TODO):
+            return mgr.create_issue(space_id=space_id or ctv.space_id,
+                                    title="t", description="d", status=status)
 
-        assert mgr.get_issue(space_id="NOSUCH",
+        return _make_issue
+
+    def test_a_new_space_counts_no_issues(self, ctv, new_space, get_raw):
+        assert new_space.issue_count == 0
+        assert get_raw(new_space.PK, new_space.SK)["issue_count"] == {"N": "0"}
+
+    def test_an_issue_needs_a_space(self, mgr, scan_all):
+        with pytest.raises(DDBMissingError):
+            mgr.create_issue(space_id="NOSUCH", title="t", description="d",
+                             status=IssueStatus.TODO)
+
+        assert scan_all() == []
+
+    def test_a_deleted_space_takes_no_new_issues(self, ctv, mgr, new_space):
+        mgr.delete_space(space_id=ctv.space_id)
+
+        with pytest.raises(DDBMissingError):
+            mgr.create_issue(space_id=ctv.space_id, title="t",
+                             description="d", status=IssueStatus.TODO)
+
+    @pytest.mark.parametrize("status", list(IssueStatus))
+    def test_an_issue_in_any_status_blocks_the_delete(self, ctv, mgr,
+                                                       new_space, make_issue,
+                                                       status):
+        issue = make_issue(status=status)
+
+        with pytest.raises(DDBSpaceNotEmptyError):
+            mgr.delete_space(space_id=ctv.space_id)
+
+        assert mgr.get_space(space_id=ctv.space_id).issue_count == 1
+        assert mgr.get_issue(space_id=ctv.space_id,
                              issue_id=issue.issue_id) == issue
-        # No Space row was conjured into being alongside it.
-        assert len(scan_all()) == 1
 
-    def test_deleting_a_space_leaves_its_issues(self, ctv, mgr, new_space,
-                                                scan_all):
-        first = mgr.create_issue(space_id=ctv.space_id, title="a",
-                                 description="d", status=IssueStatus.TODO)
-        second = mgr.create_issue(space_id=ctv.space_id, title="b",
-                                  description="d", status=IssueStatus.TODO)
-
-        mgr.delete_space(space_id=ctv.space_id)
-
-        assert mgr.get_issue(space_id=ctv.space_id,
-                             issue_id=first.issue_id) == first
-        assert mgr.get_issue(space_id=ctv.space_id,
-                             issue_id=second.issue_id) == second
-        assert len(scan_all()) == 2
-
-    def test_orphaned_issues_are_still_queryable(self, ctv, mgr, new_space):
-        mgr.create_issue(space_id=ctv.space_id, title="a", description="d",
-                         status=IssueStatus.TODO)
+    def test_the_delete_succeeds_once_the_issues_are_gone(self, ctv, mgr,
+                                                          new_space,
+                                                          make_issue,
+                                                          scan_all):
+        issues = [make_issue(), make_issue(status=IssueStatus.DONE)]
+        for issue in issues:
+            mgr.delete_issue(space_id=ctv.space_id, issue_id=issue.issue_id)
 
         mgr.delete_space(space_id=ctv.space_id)
 
-        issues, _ = mgr.get_issues_by_status(space_id=ctv.space_id,
-                                             status=IssueStatus.TODO)
-        assert [i.title for i in issues] == ["a"]
+        assert scan_all() == []
+
+    def test_issues_in_another_space_do_not_block_it(self, ctv, mgr,
+                                                     new_space, make_issue):
+        mgr.create_space(space_id=ctv.other_space_id, name="Ops",
+                         description="d")
+        make_issue(space_id=ctv.other_space_id)
+
+        mgr.delete_space(space_id=ctv.space_id)
+
+        with pytest.raises(DDBMissingError):
+            mgr.get_space(space_id=ctv.space_id)
+
+    def test_a_missing_space_raises_missing_not_not_empty(self, mgr):
+        with pytest.raises(DDBMissingError):
+            mgr.delete_space(space_id="NOSUCH")
+
+    def test_update_space_version_survives_issue_writes(self, ctv, mgr,
+                                                        new_space,
+                                                        make_issue):
+        issue = make_issue()
+        mgr.delete_issue(space_id=ctv.space_id, issue_id=issue.issue_id)
+        make_issue()
+
+        updated = mgr.update_space(space_id=ctv.space_id, name="New",
+                                   description="d",
+                                   version=new_space.version)
+
+        assert updated.name == "New"
+        assert updated.issue_count == 1
+
+    def test_a_create_held_by_an_issue_transaction_is_retried(
+            self, ctv, mgr, hold_by_transaction):
+        # create_issue's transaction locks the Space key even while no Space
+        # exists there.
+        calls = hold_by_transaction("put_item")
+
+        mgr.create_space(space_id=ctv.space_id, name="n", description="d")
+
+        assert len(calls) == 2
+        assert mgr.get_space(space_id=ctv.space_id).name == "n"
+
+    @pytest.mark.parametrize("op", ["update_item", "delete_item"])
+    def test_a_write_held_by_an_issue_transaction_is_retried(
+            self, ctv, mgr, new_space, hold_by_transaction, op):
+        calls = hold_by_transaction(op)
+
+        if op == "update_item":
+            assert mgr.update_space(space_id=ctv.space_id, name="New",
+                                    description="d").name == "New"
+        else:
+            mgr.delete_space(space_id=ctv.space_id)
+            with pytest.raises(DDBMissingError):
+                mgr.get_space(space_id=ctv.space_id)
+
+        assert len(calls) == 2
+
+    @pytest.mark.parametrize("op", ["update_item", "delete_item"])
+    def test_a_write_held_on_every_attempt_raises_conflict(
+            self, ctv, mgr, new_space, hold_by_transaction, op):
+        hold_by_transaction(op, times=float("inf"))
+
+        with pytest.raises(DDBTransactionConflictError):
+            if op == "update_item":
+                mgr.update_space(space_id=ctv.space_id, name="New",
+                                 description="d")
+            else:
+                mgr.delete_space(space_id=ctv.space_id)
 
     def test_a_space_and_an_issue_occupy_separate_partitions(self, ctv, mgr,
                                                              new_space,
+                                                             make_issue,
                                                              scan_all):
-        issue = mgr.create_issue(space_id=ctv.space_id, title="a",
-                                 description="d", status=IssueStatus.TODO)
+        issue = make_issue()
 
         assert new_space.PK != issue.PK
         assert len(scan_all()) == 2
 
-    def test_deleting_an_issue_leaves_its_space(self, ctv, mgr, new_space):
-        issue = mgr.create_issue(space_id=ctv.space_id, title="a",
-                                 description="d", status=IssueStatus.TODO)
+    def test_deleting_an_issue_leaves_its_space(self, ctv, mgr, new_space,
+                                                make_issue):
+        issue = make_issue()
 
         mgr.delete_issue(space_id=ctv.space_id, issue_id=issue.issue_id)
 
-        assert mgr.get_space(space_id=ctv.space_id) == new_space
+        space = mgr.get_space(space_id=ctv.space_id)
+        assert space.issue_count == 0
+        assert space.version == new_space.version
