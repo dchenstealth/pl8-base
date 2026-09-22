@@ -448,6 +448,28 @@ class TestBaseObjectContract:
     def test_dict_includes_the_type_tag(self):
         assert make_info().dict()["type"] == "IssueInfo"
 
+    def test_public_dict_omits_key_attrs(self):
+        info = make_info()
+        public = info.public_dict()
+
+        for attr in info.KEY_ATTRS:
+            assert attr not in public
+
+    def test_public_dict_keeps_non_key_attrs(self):
+        info = make_info()
+        public = info.public_dict()
+
+        assert public["issue_id"] == info.issue_id
+        assert public["title"] == info.title
+        assert public["type"] == "IssueInfo"
+
+    def test_public_dict_matches_dict_minus_key_attrs(self):
+        info = make_info()
+        full = info.dict()
+        public = info.public_dict()
+
+        assert public == {k: v for k, v in full.items() if k not in info.KEY_ATTRS}
+
     def test_from_item_rejects_a_missing_required_field(self, ts, td):
         item = make_info().serialize(ts=ts)
         del item["title"]
