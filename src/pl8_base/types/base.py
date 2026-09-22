@@ -84,6 +84,11 @@ class BaseObject(msgspec.Struct, tag=True, tag_field="type",
     def dict(self):
         return msgspec.to_builtins(self)
 
+    def public_dict(self):
+        # Same as dict(), minus the DynamoDB key attrs (PK, SK, GSI keys, ...),
+        # which are internal storage details that should not leak to API consumers.
+        return {k: v for k, v in self.dict().items() if k not in self.KEY_ATTRS}
+
     @classmethod
     def compress_value(cls, attr, value):
         """Compress one attr value if the attr is compressed on this type.
