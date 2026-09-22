@@ -11,9 +11,11 @@ look like. test_manager.py's put_raw is the deliberate exception: it exists for
 the corruption cases the API cannot produce.
 
 Only cross-entity fixtures belong here. Anything specific to one entity stays
-local to its own test module, and in particular nothing here may write a row:
-several tests assert exact table contents through scan_all(), so a fixture that
-created, say, a Space would silently break the Issue counts.
+local to its own test module, and in particular nothing here may write a row
+unless a test opts into it: several tests assert exact table contents through
+scan_all(), so an implicit write would silently break those counts. spaces is
+the one writing fixture, requested explicitly by the modules whose Issues need
+a Space to exist; they count rows with scan_issue_rows() instead.
 """
 
 import sys
@@ -179,3 +181,25 @@ def scan_all(ctv, dynamodb_client):
             params["ExclusiveStartKey"] = last_key
 
     return _scan_all
+
+
+@pytest.fixture
+def spaces(ctv, mgr):
+    """The ctv.space_id and ctv.other_space_id Spaces, which create_issue
+    requires to exist.
+
+    Opt-in rather than autouse, since it writes rows; see the module docstring.
+    """
+    return [mgr.create_space(space_id=space_id, name=space_id,
+                             description="d")
+            for space_id in (ctv.space_id, ctv.other_space_id)]
+
+
+@pytest.fixture
+def scan_issue_rows(scan_all):
+    """Every row except SpaceInfo, for row counts in modules using spaces."""
+    def _scan_issue_rows():
+        return [item for item in scan_all()
+                if item["type"] != {"S": "SpaceInfo"}]
+
+    return _scan_issue_rows

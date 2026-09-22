@@ -72,6 +72,13 @@ class DDBBlockingIssueDoneError(DDBError):
     """
 
 
+class DDBSpaceNotEmptyError(DDBError):
+    """Raised when deleting a Space whose issue_count is nonzero.
+
+    The caller must delete the Space's Issues first.
+    """
+
+
 class EventError(Exception):
     """Base class for event issues"""
 

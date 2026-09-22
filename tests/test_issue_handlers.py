@@ -16,6 +16,8 @@ from pl8_base.errors import (
 )
 from pl8_base.types import IssueStatus
 
+pytestmark = pytest.mark.usefixtures("spaces")
+
 
 @pytest.fixture
 def make_issue(ctv, mgr):
@@ -163,22 +165,22 @@ class TestHandleIssueDone:
         assert blocking_from(mgr, ctv, blocker)[0].is_blocking_issue_done is False
 
     def test_no_op_without_outbound_blockers(self, ctv, mgr, make_issue,
-                                             scan_all):
+                                             scan_issue_rows):
         issue = make_issue("lonely")
         mgr.transition_issue(space_id=ctv.space_id, issue_id=issue.issue_id,
                              status=IssueStatus.DONE)
-        rows_before = len(scan_all())
+        rows_before = len(scan_issue_rows())
 
         mgr.handle_issue_done(space_id=ctv.space_id, issue_id=issue.issue_id)
 
-        assert len(scan_all()) == rows_before
+        assert len(scan_issue_rows()) == rows_before
 
-    def test_no_op_for_a_missing_issue(self, ctv, mgr, scan_all):
-        rows_before = len(scan_all())
+    def test_no_op_for_a_missing_issue(self, ctv, mgr, scan_issue_rows):
+        rows_before = len(scan_issue_rows())
 
         mgr.handle_issue_done(space_id=ctv.space_id, issue_id="nope00")
 
-        assert len(scan_all()) == rows_before
+        assert len(scan_issue_rows()) == rows_before
 
     def test_leaves_inbound_blockers_alone(self, ctv, mgr, make_issue, block):
         # Only the Issues this one blocks are affected, not the ones blocking it.
@@ -284,13 +286,13 @@ class TestHandleIssueNumActiveBlockersZeroed:
         assert after_second.status == IssueStatus.TODO
         assert after_second.version == after_first.version
 
-    def test_no_op_for_a_missing_issue(self, ctv, mgr, scan_all):
-        rows_before = len(scan_all())
+    def test_no_op_for_a_missing_issue(self, ctv, mgr, scan_issue_rows):
+        rows_before = len(scan_issue_rows())
 
         mgr.handle_issue_num_active_blockers_zeroed(space_id=ctv.space_id,
                                                     issue_id="nope00")
 
-        assert len(scan_all()) == rows_before
+        assert len(scan_issue_rows()) == rows_before
 
 
 class TestHandleIssueDeleted:
@@ -372,7 +374,7 @@ class TestHandleIssueDeleted:
         assert reload(mgr, ctv, upstream).num_active_blockers == 0
 
     def test_sweeps_both_directions(self, ctv, mgr, make_issue, block,
-                                    scan_all):
+                                    scan_issue_rows):
         # entities.md: "When an Issue is deleted, every IssueBlocker naming it
         # MUST be deleted, whether it is the blocking or the blocked issue."
         subject = make_issue("subject")
@@ -385,7 +387,7 @@ class TestHandleIssueDeleted:
         mgr.handle_issue_deleted(space_id=ctv.space_id,
                                  issue_id=subject.issue_id)
 
-        remaining = [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"]
+        remaining = [i for i in scan_issue_rows() if i["type"]["S"] == "IssueBlocker"]
         assert remaining == []
         assert reload(mgr, ctv, downstream).num_active_blockers == 0
 
@@ -418,15 +420,15 @@ class TestHandleIssueDeleted:
 
         assert reload(mgr, ctv, blocked).num_active_blockers == 0
 
-    def test_no_op_for_a_missing_issue(self, ctv, mgr, scan_all):
-        rows_before = len(scan_all())
+    def test_no_op_for_a_missing_issue(self, ctv, mgr, scan_issue_rows):
+        rows_before = len(scan_issue_rows())
 
         mgr.handle_issue_deleted(space_id=ctv.space_id, issue_id="nope00")
 
-        assert len(scan_all()) == rows_before
+        assert len(scan_issue_rows()) == rows_before
 
     def test_pages_past_one_query_page(self, ctv, mgr, make_issue, block,
-                                       scan_all):
+                                       scan_issue_rows):
         subject = make_issue("subject")
         for n in range(60):
             block(subject, make_issue(f"blocked-{n}"))
@@ -435,10 +437,10 @@ class TestHandleIssueDeleted:
         mgr.handle_issue_deleted(space_id=ctv.space_id,
                                  issue_id=subject.issue_id)
 
-        remaining = [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"]
+        remaining = [i for i in scan_issue_rows() if i["type"]["S"] == "IssueBlocker"]
         assert remaining == []
 
-    def test_works_across_spaces(self, ctv, mgr, make_issue, block, scan_all):
+    def test_works_across_spaces(self, ctv, mgr, make_issue, block, scan_issue_rows):
         subject = make_issue("subject")
         remote_up = make_issue("remote-up", space_id=ctv.other_space_id)
         remote_down = make_issue("remote-down", space_id=ctv.other_space_id)
@@ -449,7 +451,7 @@ class TestHandleIssueDeleted:
         mgr.handle_issue_deleted(space_id=ctv.space_id,
                                  issue_id=subject.issue_id)
 
-        remaining = [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"]
+        remaining = [i for i in scan_issue_rows() if i["type"]["S"] == "IssueBlocker"]
         assert remaining == []
         assert mgr.get_issue(
             space_id=ctv.other_space_id,
@@ -823,7 +825,7 @@ class TestUnblockingFlows:
 
     def test_deleting_a_blocked_issue_leaves_no_orphan_rows(self, ctv, mgr,
                                                             make_issue, block,
-                                                            scan_all):
+                                                            scan_issue_rows):
         blocker = make_issue("blocker")
         blocked = make_issue("blocked")
         block(blocker, blocked)
@@ -832,7 +834,7 @@ class TestUnblockingFlows:
         mgr.handle_issue_deleted(space_id=ctv.space_id,
                                  issue_id=blocked.issue_id)
 
-        remaining = [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"]
+        remaining = [i for i in scan_issue_rows() if i["type"]["S"] == "IssueBlocker"]
         assert remaining == []
 
         with pytest.raises(DDBMissingError):
@@ -866,10 +868,10 @@ class TestSweepDoesNotTrustTheQueriedFlag:
         return SimpleNamespace(blocking=blocking, blocked=blocked, stale=stale)
 
     def test_the_row_is_deleted_anyway(self, ctv, mgr, satisfied_blocker,
-                                       scan_all):
+                                       scan_issue_rows):
         mgr.delete_blocker_for_sweep(satisfied_blocker.stale)
 
-        remaining = [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"]
+        remaining = [i for i in scan_issue_rows() if i["type"]["S"] == "IssueBlocker"]
         assert remaining == []
 
     def test_the_counter_is_not_decremented_twice(self, ctv, mgr,
@@ -883,7 +885,7 @@ class TestSweepDoesNotTrustTheQueriedFlag:
                       satisfied_blocker.blocked).num_active_blockers == 0
 
     def test_end_to_end_when_done_is_handled_before_deleted(
-            self, ctv, mgr, make_issue, block, scan_all):
+            self, ctv, mgr, make_issue, block, scan_issue_rows):
         """The delivery order that produces the stale read: IssueDone lands
         first, then IssueDeleted for the same Issue."""
         blocking = make_issue("blocking")
@@ -899,12 +901,12 @@ class TestSweepDoesNotTrustTheQueriedFlag:
         mgr.handle_issue_deleted(space_id=ctv.space_id,
                                  issue_id=blocking.issue_id)
 
-        remaining = [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"]
+        remaining = [i for i in scan_issue_rows() if i["type"]["S"] == "IssueBlocker"]
         assert remaining == []
         assert reload(mgr, ctv, blocked).num_active_blockers == 0
 
     def test_an_active_blocker_still_decrements(self, ctv, mgr, make_issue,
-                                                block, scan_all):
+                                                block, scan_issue_rows):
         """The unchanged path: a flag that really is False still takes the
         transactional form, so the counter comes down with the row."""
         blocking = make_issue("blocking")
@@ -916,10 +918,10 @@ class TestSweepDoesNotTrustTheQueriedFlag:
         mgr.delete_blocker_for_sweep(blocker)
 
         assert reload(mgr, ctv, blocked).num_active_blockers == 0
-        assert [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"] == []
+        assert [i for i in scan_issue_rows() if i["type"]["S"] == "IssueBlocker"] == []
 
     def test_a_blocker_whose_blocked_issue_is_gone_is_still_deleted(
-            self, ctv, mgr, make_issue, block, scan_all):
+            self, ctv, mgr, make_issue, block, scan_issue_rows):
         """The other way the transaction's condition fails: there is no
         counter left to decrement, and the row must still go."""
         blocking = make_issue("blocking")
@@ -929,16 +931,16 @@ class TestSweepDoesNotTrustTheQueriedFlag:
         mgr.delete_issue(space_id=ctv.space_id, issue_id=blocked.issue_id)
         mgr.delete_blocker_for_sweep(blocker)
 
-        assert [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"] == []
+        assert [i for i in scan_issue_rows() if i["type"]["S"] == "IssueBlocker"] == []
 
     def test_a_replayed_sweep_is_still_a_no_op(self, ctv, mgr,
-                                               satisfied_blocker, scan_all):
+                                               satisfied_blocker, scan_issue_rows):
         """Falling through to the plain delete must not break idempotency:
         delete_blocker_row tolerates the row already being gone."""
         mgr.delete_blocker_for_sweep(satisfied_blocker.stale)
         mgr.delete_blocker_for_sweep(satisfied_blocker.stale)
 
-        assert [i for i in scan_all() if i["type"]["S"] == "IssueBlocker"] == []
+        assert [i for i in scan_issue_rows() if i["type"]["S"] == "IssueBlocker"] == []
         assert reload(mgr, ctv,
                       satisfied_blocker.blocked).num_active_blockers == 0
 

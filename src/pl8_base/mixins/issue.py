@@ -33,10 +33,10 @@ BLOCKER_SK_PREFIX = "800#BLOCKEDISSUE#"
 class IssueMixin:
     """Issue operations.
 
-    The handle_* methods are not invoked by DynamoDB directly. A separate
-    stream handler consumes the DynamoDB stream and publishes an event to
-    EventBridge, which routes it to an SQS queue whose consumer calls these.
-    None of that plumbing exists yet.
+    The handle_* methods are not invoked by DynamoDB directly. pl8-services'
+    pl8-stream-handler consumes the DynamoDB stream and publishes an event to
+    EventBridge, which routes it to an SQS queue whose consumer,
+    pl8-event-handler, calls these.
 
     That path delivers at-least-once and unordered, so every handle_* method
     must be idempotent and safe to apply late. Each gets both by conditioning
@@ -46,8 +46,12 @@ class IssueMixin:
     Every public method validates its space_id before it reaches a key, the
     same as SpaceMixin does. An Issue key composes ISSUE#{space_id}#{issue_id},
     so a space_id carrying a "#" would alias one Issue onto another
-    (space_id, issue_id) pair; see util.validate_space_id. Validating is not a
-    Space existence check, which entities.md forbids requiring.
+    (space_id, issue_id) pair; see util.validate_space_id.
+
+    create_issue and delete_issue also keep the Space's issue_count in step,
+    in the same transaction as the Issue write. That is what refuses an Issue
+    in a missing Space and what lets delete_space refuse a Space that still
+    has Issues; see SpaceMixin.
     """
 
     # ------------------------------------------------------------------
@@ -121,8 +125,12 @@ class IssueMixin:
     # Issue CRUD
     # ------------------------------------------------------------------
 
+    @retry_on_transaction_conflict()
     def create_issue(self, *, space_id, title, description, status):
-        """Create an Issue.
+        """Create an Issue and count it against its Space.
+
+        The Space row takes a write for every Issue created in it, so
+        concurrent creates in one Space contend on it; a conflict is retried.
 
         Args:
             space_id (str): id of the issue's space
@@ -135,7 +143,9 @@ class IssueMixin:
         Raises:
             DDBArgsError: if space_id or status is invalid, or description is
                 not a string
+            DDBMissingError: if the Space does not exist
             DDBIdCollisionError: Collision error on issue_id
+            DDBTransactionConflictError: if every attempt conflicts
             DDBInternalError: internal database error
         """
         validate_space_id(space_id)
@@ -151,15 +161,30 @@ class IssueMixin:
                 status=status,
             )
 
+            # Ordering is load-bearing: CancellationReasons come back
+            # positionally.
+            items = [
+                {"Update": self.space_issue_count_update(space_id, 1)},
+                {"Put": {
+                    "TableName": self.table_name,
+                    "Item": issue_info.serialize(ts=self.ts),
+                    "ConditionExpression": "attribute_not_exists(#PK)",
+                    "ExpressionAttributeNames": {"#PK": "PK"},
+                }},
+            ]
+
             try:
-                self.dynamodb_client.put_item(
-                    TableName=self.table_name,
-                    Item=issue_info.serialize(ts=self.ts),
-                    ConditionExpression="attribute_not_exists(#PK)",
-                    ExpressionAttributeNames={"#PK": "PK"},
-                )
+                self.dynamodb_client.transact_write_items(TransactItems=items)
             except ClientError as exc:
-                if self.is_condition_failure(exc):
+                self.raise_for_transaction_conflict(exc)
+
+                failed, _ = self.failed_reason_item(exc, 0)
+                if failed:
+                    raise DDBMissingError(
+                        f"Space not found: {space_id}") from exc
+
+                failed, _ = self.failed_reason_item(exc, 1)
+                if failed:
                     # The id is taken; generate another rather than overwrite
                     continue
 
@@ -357,8 +382,9 @@ class IssueMixin:
                                       issue_id=issue_id, version=version,
                                       classify=classify)
 
+    @retry_on_transaction_conflict()
     def delete_issue(self, *, space_id, issue_id):
-        """Delete an Issue's info row.
+        """Delete an Issue's info row and uncount it from its Space.
 
         The IssueBlockers naming it are swept by handle_issue_deleted, which
         the stream handler drives once this write lands.
@@ -366,21 +392,37 @@ class IssueMixin:
         Raises:
             DDBArgsError: if space_id is invalid
             DDBMissingError: if the Issue does not exist
+            DDBTransactionConflictError: if every attempt conflicts
             DDBInternalError: internal database error
         """
         validate_space_id(space_id)
 
+        # Ordering is load-bearing: CancellationReasons come back positionally.
+        items = [
+            {"Delete": {
+                "TableName": self.table_name,
+                "Key": self.issue_info_key(space_id, issue_id),
+                "ConditionExpression": "attribute_exists(#PK)",
+                "ExpressionAttributeNames": {"#PK": "PK"},
+            }},
+            {"Update": self.space_issue_count_update(space_id, -1)},
+        ]
+
         try:
-            self.dynamodb_client.delete_item(
-                TableName=self.table_name,
-                Key=self.issue_info_key(space_id, issue_id),
-                ConditionExpression="attribute_exists(#PK)",
-                ExpressionAttributeNames={"#PK": "PK"},
-            )
+            self.dynamodb_client.transact_write_items(TransactItems=items)
         except ClientError as exc:
-            if self.is_condition_failure(exc):
+            self.raise_for_transaction_conflict(exc)
+
+            failed, _ = self.failed_reason_item(exc, 0)
+            if failed:
                 raise DDBMissingError(
                     f"Issue not found: {space_id}#{issue_id}") from exc
+
+            # Unreachable while the invariant holds: a counted Issue keeps its
+            # Space from being deleted.
+            failed, _ = self.failed_reason_item(exc, 1)
+            if failed:
+                raise DDBMissingError(f"Space not found: {space_id}") from exc
 
             self.log_client_error(exc)
             raise DDBInternalError(f"Error deleting issue: {exc!s}") from exc
@@ -416,7 +458,7 @@ class IssueMixin:
             raise DDBArgsError("Issue cannot block itself")
 
         # Blocking cycles between distinct Issues are permitted; the remedy is
-        # delete_issue_blocker. See docs architecture/pl8/entities.md.
+        # delete_issue_blocker. See pl8-docs architecture/entities.md.
         issue_blocker = IssueBlocker(
             blocking_issue_space_id=blocking_issue_space_id,
             blocking_issue_id=blocking_issue_id,

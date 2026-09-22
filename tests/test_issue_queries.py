@@ -6,6 +6,8 @@ import pytest
 
 from pl8_base.types import IssueStatus
 
+pytestmark = pytest.mark.usefixtures("spaces")
+
 
 @pytest.fixture
 def make_issue(ctv, mgr):
