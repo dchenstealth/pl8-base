@@ -4,8 +4,9 @@
 
 from types import MappingProxyType
 from typing import ClassVar
+from uuid import uuid7
 
-from ..util import gen_comment_id, isotime
+from ..util import comment_created_at, isotime
 from .base import BaseObject
 from .enums import IssueStatus
 
@@ -76,9 +77,12 @@ class IssueComment(BaseObject):
     and its 800#BLOCKEDISSUE rows, so a bare PK query returns the Issue, then
     its comments oldest first, then its blockers.
 
-    comment_id is a UUIDv7 minted from created_at, so ordering by sort key is
-    ordering by creation timestamp; see util.gen_comment_id for why the
-    timestamp is kept out of the key rather than put in it.
+    comment_id is a UUIDv7 and created_at is read back out of it, so ordering
+    by sort key is ordering by creation timestamp. A UUIDv7 leads with a 48 bit
+    big-endian millisecond timestamp and uuid7 counts within each millisecond
+    on top of that, so ids sort in the order they were minted. That is what
+    keeps the timestamp out of the sort key, and so what lets a comment be
+    addressed by its id alone; see util.comment_created_at.
 
     An IssueComment MUST NOT outlive its Issue. The Issue's num_comments is
     what holds that, atomically with every comment write, and
@@ -101,16 +105,16 @@ class IssueComment(BaseObject):
     comment_id: str | None = None
 
     def __post_init__(self):
-        # comment_id feeds SK and is minted from created_at, so both must be
-        # resolved before BaseObject.__post_init__ renders KEY_ATTRS from
-        # self.dict(). Setting created_at here also makes the base class skip
-        # it, which is what keeps the id and the timestamp one instant apart
-        # rather than two clock readings.
-        if not self.created_at:
-            self.created_at = isotime()
-
+        # comment_id feeds SK, so it must be resolved before
+        # BaseObject.__post_init__ renders KEY_ATTRS from self.dict().
         if not self.comment_id:
-            self.comment_id = gen_comment_id(self.created_at)
+            self.comment_id = str(uuid7())
+
+        # created_at is read back out of the id rather than taken from a second
+        # clock reading, so the two cannot disagree about when the comment was
+        # written. Setting it here also makes the base class skip it.
+        if not self.created_at:
+            self.created_at = comment_created_at(self.comment_id)
 
         super().__post_init__()
 

@@ -23,9 +23,8 @@ class CommentMixin:
     """IssueComment operations.
 
     A comment shares its Issue's partition, so a thread is one query and no GSI
-    carries it. comment_id is a UUIDv7 minted from created_at, which is what
-    makes sort key order creation order; see util.gen_comment_id and
-    types/issue.py.
+    carries it. comment_id is a UUIDv7 and created_at is read back out of it,
+    which is what makes sort key order creation order; see types/issue.py.
 
     create_issue_comment and delete_issue_comment keep the Issue's num_comments
     in step, in the same transaction as the comment write. That is what refuses
@@ -115,8 +114,9 @@ class CommentMixin:
             failed, _ = self.failed_reason_item(exc, 1)
             if failed:
                 # Not rerolled into a new id, unlike create_issue. A UUIDv7
-                # carries 74 random bits, so a clash is not contention to retry
-                # past but a sign that ids are not being minted as assumed.
+                # carries 74 random bits and uuid7 counts within a millisecond
+                # on top of that, so a clash is not contention to retry past
+                # but a sign that ids are not being minted as assumed.
                 raise DDBExistsError(
                     f"IssueComment exists: {comment.comment_id}") from exc
 
@@ -144,8 +144,8 @@ class CommentMixin:
         """One page of an Issue's IssueComments, oldest first.
 
         Sorted by sort key ascending, which is by comment_id, which is by
-        creation timestamp: see util.gen_comment_id. Nothing sorts on an
-        updated timestamp, so editing a comment does not move it in the thread.
+        creation timestamp: see types/issue.py. Nothing sorts on an updated
+        timestamp, so editing a comment does not move it in the thread.
 
         The SK prefix is what keeps the Issue's own info and blocker rows out
         of the result. That is a key condition rather than a filter, so Limit

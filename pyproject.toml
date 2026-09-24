@@ -12,15 +12,12 @@ license-files = ["LICENSE"]
 authors = [
     { name = "Daniel Chen", email = "dchenstealth@gmail.com" }
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 keywords = ["issue-tracker", "dynamodb", "aws", "lambda"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
 ]

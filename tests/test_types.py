@@ -4,7 +4,6 @@
 
 import gzip
 import uuid
-from datetime import UTC, datetime
 
 import msgspec
 import pytest
@@ -22,7 +21,7 @@ from pl8_base.types import (
     SpaceInfo,
 )
 from pl8_base.types.base import BaseObject
-from pl8_base.util import isotime
+from pl8_base.util import comment_created_at
 
 
 @pytest.fixture
@@ -58,6 +57,9 @@ def make_blocker(**overrides):
     }
     kwargs.update(overrides)
     return IssueBlocker(**kwargs)
+
+
+PRESET_COMMENT_ID = "0199f3a1-0000-7000-8000-000000000001"
 
 
 def make_comment(**overrides):
@@ -239,10 +241,10 @@ class TestIssueInfoSerialization:
 
 class TestIssueCommentKeys:
     def test_renders_exact_keys(self):
-        comment = make_comment(comment_id="0199f3a1-0000-7000-8000-000000000001")
+        comment = make_comment(comment_id=PRESET_COMMENT_ID)
 
         assert comment.PK == "ISSUE#ENG#abc123"
-        assert comment.SK == "500#COMMENT#0199f3a1-0000-7000-8000-000000000001"
+        assert comment.SK == f"500#COMMENT#{PRESET_COMMENT_ID}"
 
     def test_carries_no_gsi_keys(self):
         # A comment is reachable from its Issue's partition alone.
@@ -257,15 +259,19 @@ class TestIssueCommentKeys:
     def test_comment_id_defaults_to_a_uuidv7(self):
         assert uuid.UUID(make_comment().comment_id).version == 7
 
-    def test_comment_id_is_minted_from_created_at(self):
-        # Ordering is by id, so the id must carry created_at's millisecond
-        # rather than a second, independent clock reading.
+    def test_created_at_comes_from_the_comment_id(self):
+        # Ordering is by id, so created_at is read back out of the id rather
+        # than taken from a second, independent clock reading.
         comment = make_comment()
 
-        unix_ts_ms = uuid.UUID(comment.comment_id).int >> 80
-        recovered = isotime(datetime.fromtimestamp(unix_ts_ms / 1000, tz=UTC))
+        assert comment_created_at(comment.comment_id) == comment.created_at
 
-        assert recovered == comment.created_at
+    def test_an_explicit_created_at_is_kept(self):
+        # Only a generated comment takes its timestamp from its id; a row
+        # loaded from the table arrives with both already set.
+        comment = make_comment(created_at="2020-05-05T00:00:00.000Z")
+
+        assert comment.created_at == "2020-05-05T00:00:00.000Z"
 
     def test_comment_id_reaches_sk(self):
         # IssueComment.__post_init__ must resolve comment_id before
@@ -276,15 +282,21 @@ class TestIssueCommentKeys:
         assert comment.SK == f"500#COMMENT#{comment.comment_id}"
 
     def test_explicit_comment_id_is_used(self):
-        comment = make_comment(comment_id="preset")
+        comment = make_comment(comment_id=PRESET_COMMENT_ID)
 
-        assert comment.SK == "500#COMMENT#preset"
+        assert comment.SK == f"500#COMMENT#{PRESET_COMMENT_ID}"
 
-    def test_sks_sort_chronologically(self):
-        earlier = make_comment(created_at="2026-01-01T00:00:01.000Z")
-        later = make_comment(created_at="2026-01-01T00:00:02.000Z")
+    def test_a_non_uuidv7_comment_id_is_rejected(self):
+        # created_at is read out of the id, so an id with no timestamp in it
+        # has nothing to give.
+        with pytest.raises(DDBArgsError, match="Invalid comment id"):
+            make_comment(comment_id="preset")
 
-        assert earlier.SK < later.SK
+    def test_sks_sort_in_minting_order(self):
+        # What lets a single partition query return a thread oldest first.
+        sks = [make_comment().SK for _ in range(100)]
+
+        assert sks == sorted(sks)
 
     def test_preset_keys_are_not_overwritten(self):
         comment = make_comment(PK="PRESET#PK", SK="PRESET#SK")
@@ -318,11 +330,11 @@ class TestIssueCommentSerialization:
         assert loaded.body == "line one\nline two"
 
     def test_serialized_pk_is_primary_key_only(self, ts):
-        comment = make_comment(comment_id="cid")
+        comment = make_comment(comment_id=PRESET_COMMENT_ID)
 
         assert comment.serialized_pk(ts=ts) == {
             "PK": {"S": "ISSUE#ENG#abc123"},
-            "SK": {"S": "500#COMMENT#cid"},
+            "SK": {"S": f"500#COMMENT#{PRESET_COMMENT_ID}"},
         }
 
     def test_non_string_body_is_rejected(self):

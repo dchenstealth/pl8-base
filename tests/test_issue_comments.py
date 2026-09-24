@@ -4,7 +4,6 @@
 
 import gzip
 import uuid
-from datetime import UTC, datetime
 
 import pytest
 
@@ -15,7 +14,7 @@ from pl8_base.errors import (
     DDBVersionConflictError,
 )
 from pl8_base.types import IssueComment, IssueStatus
-from pl8_base.util import isotime
+from pl8_base.util import comment_created_at
 
 pytestmark = pytest.mark.usefixtures("spaces")
 
@@ -69,13 +68,10 @@ class TestCreateIssueComment:
     def test_generates_a_uuidv7_id(self, comment):
         assert uuid.UUID(comment.comment_id).version == 7
 
-    def test_id_carries_the_creation_timestamp(self, comment):
-        # The id is what orders the thread, so it must agree with created_at
-        # rather than be a second, independent clock reading.
-        unix_ts_ms = uuid.UUID(comment.comment_id).int >> 80
-        recovered = isotime(datetime.fromtimestamp(unix_ts_ms / 1000, tz=UTC))
-
-        assert recovered == comment.created_at
+    def test_created_at_comes_from_the_id(self, comment):
+        # The id is what orders the thread, so created_at is read back out of
+        # it rather than taken from a second, independent clock reading.
+        assert comment_created_at(comment.comment_id) == comment.created_at
 
     def test_writes_exactly_one_row(self, comment, issue, scan_issue_rows):
         # The Issue's own info row, plus the comment
@@ -166,8 +162,8 @@ class TestCreateIssueComment:
                                                   monkeypatch, comment):
         # Unlike an issue_id collision, a UUIDv7 clash is not contention to
         # retry past.
-        monkeypatch.setattr("pl8_base.types.issue.gen_comment_id",
-                            lambda created_at: comment.comment_id)
+        monkeypatch.setattr("pl8_base.types.issue.uuid7",
+                            lambda: uuid.UUID(comment.comment_id))
 
         with pytest.raises(DDBExistsError, match="IssueComment exists"):
             mgr.create_issue_comment(space_id=ctv.space_id,
@@ -176,8 +172,8 @@ class TestCreateIssueComment:
 
     def test_an_id_clash_leaves_the_counter_alone(self, ctv, mgr, issue,
                                                   monkeypatch, comment):
-        monkeypatch.setattr("pl8_base.types.issue.gen_comment_id",
-                            lambda created_at: comment.comment_id)
+        monkeypatch.setattr("pl8_base.types.issue.uuid7",
+                            lambda: uuid.UUID(comment.comment_id))
 
         with pytest.raises(DDBExistsError):
             mgr.create_issue_comment(space_id=ctv.space_id,

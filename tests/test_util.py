@@ -25,9 +25,9 @@ from pl8_base.types import IssueStatus
 from pl8_base.util import (
     DEFAULT_ID_ALPHABET,
     cleanup_decimals,
+    comment_created_at,
     decode_pagination_cursor,
     encode_pagination_cursor,
-    gen_comment_id,
     gen_issue_id,
     isotime,
     retry_on_transaction_conflict,
@@ -510,53 +510,42 @@ class TestValidateSpaceId:
             validate_space_id(None)
 
 
-class TestGenCommentId:
-    def test_is_a_uuidv7(self):
-        parsed = uuid.UUID(gen_comment_id(isotime()))
+class TestCommentCreatedAt:
+    def test_reads_back_the_minting_instant(self):
+        before = isotime()
+        comment_id = str(uuid.uuid7())
+        after = isotime()
 
-        assert parsed.version == 7
+        assert before <= comment_created_at(comment_id) <= after
 
-    def test_carries_the_given_timestamp(self):
-        created_at = "2026-09-24T12:00:00.123Z"
+    def test_matches_isotime_formatting(self):
+        # created_at is stored and compared as a string, so the format has to
+        # be the one every other timestamp uses.
+        created_at = comment_created_at(str(uuid.uuid7()))
 
+        assert created_at.endswith("Z")
+        assert isotime(datetime.fromisoformat(created_at)) == created_at
+
+    def test_round_trips_a_known_timestamp(self):
         # RFC 9562 puts unix_ts_ms in the leading 48 bits
-        unix_ts_ms = uuid.UUID(gen_comment_id(created_at)).int >> 80
+        unix_ts_ms = 1790251200123
+        comment_id = str(uuid.UUID(int=(unix_ts_ms << 80) | (0x7 << 76)
+                                   | (0b10 << 62)))
 
-        assert unix_ts_ms == 1790251200123
+        assert comment_created_at(comment_id) == "2026-09-24T12:00:00.123Z"
 
-    def test_round_trips_isotime_exactly(self):
-        # The id is what orders a thread, so it must carry created_at's
-        # millisecond rather than one either side of it.
-        created_at = isotime()
-
-        unix_ts_ms = uuid.UUID(gen_comment_id(created_at)).int >> 80
-        recovered = isotime(datetime.fromtimestamp(unix_ts_ms / 1000, tz=UTC))
-
-        assert recovered == created_at
-
-    def test_ids_sort_in_creation_order(self):
-        # The whole reason comments need no timestamp in their sort key.
-        stamps = [isotime(datetime(2026, 9, 24, 12, 0, second, tzinfo=UTC))
-                  for second in range(10)]
-
-        ids = [gen_comment_id(stamp) for stamp in stamps]
-
-        assert ids == sorted(ids)
-
-    def test_ids_in_one_millisecond_are_distinct(self):
-        created_at = isotime()
-
-        ids = {gen_comment_id(created_at) for _ in range(100)}
-
-        assert len(ids) == 100
-
-    def test_rejects_a_malformed_timestamp(self):
-        with pytest.raises(DDBArgsError, match="Invalid created_at"):
-            gen_comment_id("not a timestamp")
+    def test_rejects_a_malformed_id(self):
+        with pytest.raises(DDBArgsError, match="Invalid comment id"):
+            comment_created_at("not a uuid")
 
     def test_rejects_a_non_string(self):
-        with pytest.raises(DDBArgsError, match="Invalid created_at"):
-            gen_comment_id(None)
+        with pytest.raises(DDBArgsError, match="Invalid comment id"):
+            comment_created_at(None)
+
+    def test_rejects_a_uuid_of_another_version(self):
+        # A v4 carries no timestamp, so there is nothing to read back.
+        with pytest.raises(DDBArgsError, match="not a UUIDv7"):
+            comment_created_at(str(uuid.uuid4()))
 
 
 class TestValidateCreator:

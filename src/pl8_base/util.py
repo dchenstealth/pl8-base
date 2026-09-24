@@ -133,49 +133,34 @@ def validate_space_id(space_id):
         raise DDBArgsError("Space ID has invalid characters")
 
 
-def gen_comment_id(created_at):
+def comment_created_at(comment_id):
     """
-    Generate a comment id: a UUIDv7 carrying created_at's timestamp.
+    The creation timestamp a comment id carries.
 
-    Derived from created_at rather than from its own clock reading, so the two
-    cannot disagree about when the comment was written. That matters because
-    comments are ordered by id: a UUIDv7 leads with a 48 bit big-endian
-    millisecond timestamp, so ids sort in the order they were minted, and a
-    single partition query returns a thread oldest first with no GSI and no
-    timestamp in the sort key. Keeping the timestamp out of the key is what
-    lets a comment be addressed by its id alone.
-
-    Ties within a millisecond are broken by the 74 random bits, so ordering
-    between two comments written that close together is arbitrary but stable.
+    A comment's created_at is read back out of its id rather than taken from a
+    second clock reading, so the two cannot disagree about when the comment was
+    written. uuid7 mints from its own clock and takes no timestamp, so this is
+    the direction that keeps them in step.
 
     Args:
-        created_at (str): ISO-8601 timestamp, as isotime renders it
+        comment_id (str): a UUIDv7, as IssueComment mints it
 
     Returns:
-        str: UUIDv7 in canonical hyphenated form
+        str: ISO-8601 timestamp, as isotime renders it
 
     Raises:
-        DDBArgsError: if created_at is not a parseable timestamp
+        DDBArgsError: if comment_id is not a UUIDv7
     """
     try:
-        dt = datetime.fromisoformat(created_at)
-    except (TypeError, ValueError):
-        raise DDBArgsError(f"Invalid created_at: {created_at!r}")
+        parsed = uuid.UUID(comment_id)
+    except (AttributeError, TypeError, ValueError):
+        raise DDBArgsError(f"Invalid comment id: {comment_id!r}")
 
-    # Built from whole seconds plus microseconds rather than from
-    # timestamp() * 1000, which would round-trip the value through a float and
-    # can land a millisecond either side of the truth.
-    unix_ts_ms = int(dt.timestamp()) * 1000 + dt.microsecond // 1000
+    if parsed.version != 7:
+        raise DDBArgsError(f"Comment id is not a UUIDv7: {comment_id!r}")
 
-    # RFC 9562 layout: 48 bits unix_ts_ms, 4 bits version, 12 bits rand_a,
-    # 2 bits variant, 62 bits rand_b.
-    value = (unix_ts_ms & 0xFFFFFFFFFFFF) << 80
-    value |= 0x7 << 76
-    value |= secrets.randbits(12) << 64
-    value |= 0b10 << 62
-    value |= secrets.randbits(62)
-
-    return str(uuid.UUID(int=value))
+    # UUID.time is the 48 bit unix_ts_ms field for a v7
+    return isotime(datetime.fromtimestamp(parsed.time / 1000, tz=UTC))
 
 
 def validate_creator(creator):
