@@ -23,6 +23,7 @@ def info(mgr):
         title="test title",
         description="test desc",
         status=IssueStatus.TODO,
+        creator="tester",
     )
 
 

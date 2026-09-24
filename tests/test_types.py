@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: MIT
 
 import gzip
+import uuid
+from datetime import UTC, datetime
 
 import msgspec
 import pytest
@@ -14,11 +16,13 @@ from pl8_base.types import (
     CLASS_MAP,
     EVENT_CLASS_MAP,
     IssueBlocker,
+    IssueComment,
     IssueInfo,
     IssueStatus,
     SpaceInfo,
 )
 from pl8_base.types.base import BaseObject
+from pl8_base.util import isotime
 
 
 @pytest.fixture
@@ -38,6 +42,7 @@ def make_info(**overrides):
         "title": "test title",
         "description": "test desc",
         "status": IssueStatus.TODO,
+        "creator": "tester",
     }
     kwargs.update(overrides)
     return IssueInfo(**kwargs)
@@ -55,11 +60,23 @@ def make_blocker(**overrides):
     return IssueBlocker(**kwargs)
 
 
+def make_comment(**overrides):
+    kwargs = {
+        "space_id": "ENG",
+        "issue_id": "abc123",
+        "body": "test body",
+        "creator": "tester",
+    }
+    kwargs.update(overrides)
+    return IssueComment(**kwargs)
+
+
 def make_space(**overrides):
     kwargs = {
         "space_id": "ENG",
         "name": "Engineering",
         "description": "test desc",
+        "creator": "tester",
     }
     kwargs.update(overrides)
     return SpaceInfo(**kwargs)
@@ -218,6 +235,106 @@ class TestIssueInfoSerialization:
             "PK": {"S": "ISSUE#ENG#abc123"},
             "SK": {"S": "100#INFO"},
         }
+
+
+class TestIssueCommentKeys:
+    def test_renders_exact_keys(self):
+        comment = make_comment(comment_id="0199f3a1-0000-7000-8000-000000000001")
+
+        assert comment.PK == "ISSUE#ENG#abc123"
+        assert comment.SK == "500#COMMENT#0199f3a1-0000-7000-8000-000000000001"
+
+    def test_carries_no_gsi_keys(self):
+        # A comment is reachable from its Issue's partition alone.
+        assert set(make_comment().KEY_ATTRS) == {"PK", "SK"}
+
+    def test_sorts_between_the_info_row_and_the_blockers(self):
+        comment = make_comment()
+
+        assert IssueInfo.KEY_ATTRS["SK"] < comment.SK
+        assert comment.SK < IssueBlocker.KEY_ATTRS["SK"]
+
+    def test_comment_id_defaults_to_a_uuidv7(self):
+        assert uuid.UUID(make_comment().comment_id).version == 7
+
+    def test_comment_id_is_minted_from_created_at(self):
+        # Ordering is by id, so the id must carry created_at's millisecond
+        # rather than a second, independent clock reading.
+        comment = make_comment()
+
+        unix_ts_ms = uuid.UUID(comment.comment_id).int >> 80
+        recovered = isotime(datetime.fromtimestamp(unix_ts_ms / 1000, tz=UTC))
+
+        assert recovered == comment.created_at
+
+    def test_comment_id_reaches_sk(self):
+        # IssueComment.__post_init__ must resolve comment_id before
+        # BaseObject.__post_init__ renders KEY_ATTRS, or SK would carry "None".
+        comment = make_comment()
+
+        assert "None" not in comment.SK
+        assert comment.SK == f"500#COMMENT#{comment.comment_id}"
+
+    def test_explicit_comment_id_is_used(self):
+        comment = make_comment(comment_id="preset")
+
+        assert comment.SK == "500#COMMENT#preset"
+
+    def test_sks_sort_chronologically(self):
+        earlier = make_comment(created_at="2026-01-01T00:00:01.000Z")
+        later = make_comment(created_at="2026-01-01T00:00:02.000Z")
+
+        assert earlier.SK < later.SK
+
+    def test_preset_keys_are_not_overwritten(self):
+        comment = make_comment(PK="PRESET#PK", SK="PRESET#SK")
+
+        assert comment.PK == "PRESET#PK"
+        assert comment.SK == "PRESET#SK"
+
+
+class TestIssueCommentSerialization:
+    def test_row_is_tagged_with_its_type(self, ts):
+        assert make_comment().serialize(ts=ts)["type"] == {"S": "IssueComment"}
+
+    def test_body_is_compressed(self, ts):
+        stored = make_comment().serialize(ts=ts)["body"]
+
+        assert "S" not in stored
+        assert gzip.decompress(stored["B"]).decode() == "test body"
+
+    def test_creator_is_not_compressed(self, ts):
+        assert make_comment().serialize(ts=ts)["creator"] == {"S": "tester"}
+
+    def test_round_trip(self, ts, td):
+        comment = make_comment()
+
+        assert IssueComment.from_item(comment.serialize(ts=ts), td=td) == comment
+
+    def test_round_trips_a_multiline_body(self, ts, td):
+        comment = make_comment(body="line one\nline two")
+
+        loaded = IssueComment.from_item(comment.serialize(ts=ts), td=td)
+        assert loaded.body == "line one\nline two"
+
+    def test_serialized_pk_is_primary_key_only(self, ts):
+        comment = make_comment(comment_id="cid")
+
+        assert comment.serialized_pk(ts=ts) == {
+            "PK": {"S": "ISSUE#ENG#abc123"},
+            "SK": {"S": "500#COMMENT#cid"},
+        }
+
+    def test_non_string_body_is_rejected(self):
+        with pytest.raises(DDBArgsError):
+            IssueComment.compress_value("body", 123)
+
+    def test_from_item_rejects_a_missing_required_field(self, ts, td):
+        item = make_comment().serialize(ts=ts)
+        del item["creator"]
+
+        with pytest.raises(msgspec.ValidationError):
+            IssueComment.from_item(item, td=td)
 
 
 class TestIssueBlockerKeys:
@@ -409,7 +526,8 @@ class TestClassMap:
         assert set(concrete_subclasses(BaseObject)) == set(CLASS_MAP.values())
 
     def test_matches_the_serialized_tag(self, ts):
-        for obj in (make_info(), make_blocker(), make_space()):
+        for obj in (make_info(), make_blocker(), make_comment(),
+                    make_space()):
             tag = obj.serialize(ts=ts)["type"]["S"]
             assert CLASS_MAP[tag] is type(obj)
 

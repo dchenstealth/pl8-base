@@ -10,12 +10,13 @@ from .events import (
     IssueNumActiveBlockersZeroed,
     IssueReady,
 )
-from .issue import IssueBlocker, IssueInfo
+from .issue import IssueBlocker, IssueComment, IssueInfo
 from .space import SpaceInfo
 
 CLASS_MAP = {
     "IssueInfo": IssueInfo,
     "IssueBlocker": IssueBlocker,
+    "IssueComment": IssueComment,
     "SpaceInfo": SpaceInfo,
 }
 
@@ -35,6 +36,7 @@ __all__ = [
     "EVENT_CLASS_MAP",
     "BaseEvent",
     "IssueBlocker",
+    "IssueComment",
     "IssueDeleted",
     "IssueDone",
     "IssueInfo",

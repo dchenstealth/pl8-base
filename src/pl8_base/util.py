@@ -10,12 +10,14 @@ import re
 import secrets
 import string
 import time
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import msgspec
 
 from .const import (
+    MAX_CREATOR_LEN,
     MAX_ISSUE_ID_LEN,
     MAX_SPACE_ID_LEN,
     MIN_ISSUE_ID_LEN,
@@ -129,6 +131,80 @@ def validate_space_id(space_id):
     # straight into the key.
     if not SPACE_ID_PATTERN.fullmatch(space_id):
         raise DDBArgsError("Space ID has invalid characters")
+
+
+def gen_comment_id(created_at):
+    """
+    Generate a comment id: a UUIDv7 carrying created_at's timestamp.
+
+    Derived from created_at rather than from its own clock reading, so the two
+    cannot disagree about when the comment was written. That matters because
+    comments are ordered by id: a UUIDv7 leads with a 48 bit big-endian
+    millisecond timestamp, so ids sort in the order they were minted, and a
+    single partition query returns a thread oldest first with no GSI and no
+    timestamp in the sort key. Keeping the timestamp out of the key is what
+    lets a comment be addressed by its id alone.
+
+    Ties within a millisecond are broken by the 74 random bits, so ordering
+    between two comments written that close together is arbitrary but stable.
+
+    Args:
+        created_at (str): ISO-8601 timestamp, as isotime renders it
+
+    Returns:
+        str: UUIDv7 in canonical hyphenated form
+
+    Raises:
+        DDBArgsError: if created_at is not a parseable timestamp
+    """
+    try:
+        dt = datetime.fromisoformat(created_at)
+    except (TypeError, ValueError):
+        raise DDBArgsError(f"Invalid created_at: {created_at!r}")
+
+    # Built from whole seconds plus microseconds rather than from
+    # timestamp() * 1000, which would round-trip the value through a float and
+    # can land a millisecond either side of the truth.
+    unix_ts_ms = int(dt.timestamp()) * 1000 + dt.microsecond // 1000
+
+    # RFC 9562 layout: 48 bits unix_ts_ms, 4 bits version, 12 bits rand_a,
+    # 2 bits variant, 62 bits rand_b.
+    value = (unix_ts_ms & 0xFFFFFFFFFFFF) << 80
+    value |= 0x7 << 76
+    value |= secrets.randbits(12) << 64
+    value |= 0b10 << 62
+    value |= secrets.randbits(62)
+
+    return str(uuid.UUID(int=value))
+
+
+def validate_creator(creator):
+    """
+    Validate a caller-supplied creator.
+
+    A creator records who or what made a Space, Issue or IssueComment. PL8 has
+    no user model, so it is a label the caller supplies, never an identity PL8
+    establishes: nothing here checks it against the invoking IAM principal, and
+    no operation is allowed or refused on the basis of it. Validation is
+    therefore about keeping a sane value in the row, not about trust.
+
+    It never composes a key, unlike a space_id, so nothing constrains its
+    characters and "#" is unremarkable in one.
+
+    Args:
+        creator (str): creator to validate
+
+    Raises:
+        DDBArgsError: if the creator is not a string, is empty, or is too long
+    """
+    if not isinstance(creator, str):
+        raise DDBArgsError("Creator must be a string")
+
+    if not creator:
+        raise DDBArgsError("Creator is empty")
+
+    if len(creator) > MAX_CREATOR_LEN:
+        raise DDBArgsError("Creator too long")
 
 
 def validate_issue_status(status):

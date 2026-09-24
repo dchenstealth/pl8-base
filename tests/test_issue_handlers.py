@@ -25,7 +25,7 @@ def make_issue(ctv, mgr):
         return mgr.create_issue(space_id=space_id or ctv.space_id,
                                 title=title,
                                 description=f"{title} desc",
-                                status=status)
+                                status=status, creator="tester")
 
     return _make
 
@@ -963,7 +963,7 @@ class TestSweepDoesNotTrustTheQueriedFlag:
     def test_a_replayed_sweep_is_still_a_no_op(self, ctv, mgr,
                                                satisfied_blocker, scan_issue_rows):
         """Falling through to the plain delete must not break idempotency:
-        delete_blocker_row tolerates the row already being gone."""
+        delete_row tolerates the row already being gone."""
         mgr.delete_blocker_for_sweep(satisfied_blocker.stale)
         mgr.delete_blocker_for_sweep(satisfied_blocker.stale)
 
@@ -991,3 +991,129 @@ class TestApplyIdempotentTransactionReportsOutcome:
         ], "Error in test")
 
         assert applied is False
+
+
+class TestHandleIssueDeletedSweepsComments:
+    """The comments of a deleted Issue go with it; see pl8-docs entities.md."""
+
+    @pytest.fixture
+    def commented(self, ctv, mgr, make_issue):
+        """A deleted Issue that had three comments, ready to be swept."""
+        issue = make_issue("commented")
+        for body in ("one", "two", "three"):
+            mgr.create_issue_comment(space_id=ctv.space_id,
+                                     issue_id=issue.issue_id,
+                                     body=body, creator="alice")
+        mgr.delete_issue(space_id=ctv.space_id, issue_id=issue.issue_id)
+        return issue
+
+    def test_deletes_every_comment(self, ctv, mgr, commented,
+                                   scan_issue_rows):
+        mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                 issue_id=commented.issue_id)
+
+        assert scan_issue_rows() == []
+
+    def test_is_idempotent(self, ctv, mgr, commented, scan_issue_rows):
+        mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                 issue_id=commented.issue_id)
+        mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                 issue_id=commented.issue_id)
+
+        assert scan_issue_rows() == []
+
+    def test_sweeps_comments_and_blockers_together(self, ctv, mgr, make_issue,
+                                                   block, scan_issue_rows):
+        # One partition holds both, and one sweep must clear both.
+        blocker = make_issue("blocker")
+        blocked = make_issue("blocked")
+        block(blocker, blocked)
+        mgr.create_issue_comment(space_id=ctv.space_id,
+                                 issue_id=blocker.issue_id,
+                                 body="note", creator="alice")
+
+        mgr.delete_issue(space_id=ctv.space_id, issue_id=blocker.issue_id)
+        mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                 issue_id=blocker.issue_id)
+
+        # Only the blocked Issue's own info row survives
+        assert len(scan_issue_rows()) == 1
+        assert reload(mgr, ctv, blocked).num_active_blockers == 0
+
+    def test_leaves_another_issues_comments_alone(self, ctv, mgr, make_issue,
+                                                  commented):
+        other = make_issue("other")
+        mgr.create_issue_comment(space_id=ctv.space_id,
+                                 issue_id=other.issue_id,
+                                 body="keep me", creator="alice")
+
+        mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                 issue_id=commented.issue_id)
+
+        page, _ = mgr.get_issue_comments(space_id=ctv.space_id,
+                                         issue_id=other.issue_id)
+        assert [c.body for c in page] == ["keep me"]
+
+    def test_reads_the_partition_consistently(self, ctv, mgr, commented,
+                                              monkeypatch):
+        # The sweep runs once and nothing retries it, so a comment missing
+        # from an eventually-consistent page is a comment that outlives its
+        # Issue for good.
+        queries = []
+        real_query = mgr.dynamodb_client.query
+
+        def spy(**params):
+            queries.append(params)
+            return real_query(**params)
+
+        monkeypatch.setattr(mgr.dynamodb_client, "query", spy)
+        mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                 issue_id=commented.issue_id)
+
+        partition_queries = [
+            q for q in queries
+            if q["ExpressionAttributeValues"].get(":pk")
+            == {"S": f"ISSUE#{ctv.space_id}#{commented.issue_id}"}
+        ]
+        assert partition_queries
+        assert all(q.get("ConsistentRead") for q in partition_queries)
+
+    def test_pages_through_a_large_thread(self, ctv, mgr, make_issue,
+                                          scan_issue_rows):
+        issue = make_issue("busy")
+        for index in range(30):
+            mgr.create_issue_comment(space_id=ctv.space_id,
+                                     issue_id=issue.issue_id,
+                                     body=f"note {index}", creator="alice")
+        mgr.delete_issue(space_id=ctv.space_id, issue_id=issue.issue_id)
+
+        mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                 issue_id=issue.issue_id)
+
+        assert scan_issue_rows() == []
+
+    def test_a_live_issue_partition_is_left_alone(self, ctv, mgr, make_issue,
+                                                  scan_issue_rows):
+        # A replayed event after the id was reused: the info row is back, so
+        # the rows around it belong to a different Issue. Sweeping them would
+        # delete live data, and deleting the info row would strand its Space's
+        # issue_count.
+        issue = make_issue("live")
+        mgr.create_issue_comment(space_id=ctv.space_id,
+                                 issue_id=issue.issue_id,
+                                 body="mine", creator="alice")
+
+        mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                 issue_id=issue.issue_id)
+
+        assert len(scan_issue_rows()) == 2
+        assert reload(mgr, ctv, issue).num_comments == 1
+
+    def test_a_live_issue_partition_keeps_its_space_counted(self, ctv, mgr,
+                                                            make_issue):
+        issue = make_issue("live")
+
+        mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                 issue_id=issue.issue_id)
+
+        assert mgr.get_space(space_id=ctv.space_id).issue_count == 1

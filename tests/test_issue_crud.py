@@ -30,7 +30,7 @@ def new_issue(ctv, mgr):
     return mgr.create_issue(space_id=ctv.space_id,
                             title="test title",
                             description="test desc",
-                            status=IssueStatus.TODO)
+                            status=IssueStatus.TODO, creator="tester")
 
 
 def info_keys(info):
@@ -86,7 +86,8 @@ class TestCreateIssue:
     def test_ids_are_distinct_across_calls(self, ctv, mgr):
         ids = {mgr.create_issue(space_id=ctv.space_id, title="t",
                                 description="d",
-                                status=IssueStatus.TODO).issue_id
+                                status=IssueStatus.TODO,
+                                creator="tester").issue_id
                for _ in range(10)}
         assert len(ids) == 10
 
@@ -96,9 +97,11 @@ class TestCreateIssue:
                             lambda **kwargs: "dupdup")
 
         first = mgr.create_issue(space_id=ctv.space_id, title="a",
-                                 description="d", status=IssueStatus.TODO)
+                                 description="d", status=IssueStatus.TODO,
+                                 creator="tester")
         second = mgr.create_issue(space_id=ctv.other_space_id, title="b",
-                                  description="d", status=IssueStatus.TODO)
+                                  description="d", status=IssueStatus.TODO,
+                                  creator="tester")
 
         assert first.issue_id == second.issue_id == "dupdup"
         assert first.PK != second.PK
@@ -107,7 +110,8 @@ class TestCreateIssue:
     def test_accepts_a_non_default_starting_status(self, ctv, mgr):
         issue = mgr.create_issue(space_id=ctv.space_id, title="t",
                                  description="d",
-                                 status=IssueStatus.IN_PROGRESS)
+                                 status=IssueStatus.IN_PROGRESS,
+                                 creator="tester")
 
         assert issue.status == IssueStatus.IN_PROGRESS
         assert issue.GSI1PK == f"ISSUESPACESTATUS#{ctv.space_id}#IN_PROGRESS"
@@ -117,7 +121,7 @@ class TestCreateIssue:
         # another rather than overwrite the existing Issue.
         taken = mgr.create_issue(space_id=ctv.space_id, title="original",
                                  description="original desc",
-                                 status=IssueStatus.TODO)
+                                 status=IssueStatus.TODO, creator="tester")
 
         ids = iter([taken.issue_id, "fresh1"])
         monkeypatch.setattr("pl8_base.mixins.issue.gen_issue_id",
@@ -125,7 +129,7 @@ class TestCreateIssue:
 
         created = mgr.create_issue(space_id=ctv.space_id, title="second",
                                    description="second desc",
-                                   status=IssueStatus.TODO)
+                                   status=IssueStatus.TODO, creator="tester")
 
         assert created.issue_id == "fresh1"
         assert len(scan_issue_rows()) == 2
@@ -139,7 +143,7 @@ class TestCreateIssue:
                                                 scan_issue_rows):
         taken = mgr.create_issue(space_id=ctv.space_id, title="original",
                                  description="original desc",
-                                 status=IssueStatus.TODO)
+                                 status=IssueStatus.TODO, creator="tester")
 
         calls = []
 
@@ -152,7 +156,7 @@ class TestCreateIssue:
         with pytest.raises(DDBIdCollisionError):
             mgr.create_issue(space_id=ctv.space_id, title="second",
                              description="second desc",
-                             status=IssueStatus.TODO)
+                             status=IssueStatus.TODO, creator="tester")
 
         assert len(calls) == RETRY_ISSUE_ID_COLLISIONS
         assert len(scan_issue_rows()) == 1
@@ -452,7 +456,8 @@ class TestTransitionIssue:
         # entities.md: "An Issue MUST NOT be transitioned out of BLOCKED while
         # it has active IssueBlockers"
         blocker = mgr.create_issue(space_id=ctv.space_id, title="blocker",
-                                   description="d", status=IssueStatus.TODO)
+                                   description="d", status=IssueStatus.TODO,
+                                   creator="tester")
         mgr.add_issue_blocker(blocking_issue_space_id=ctv.space_id,
                               blocking_issue_id=blocker.issue_id,
                               blocked_issue_space_id=ctv.space_id,
@@ -469,7 +474,8 @@ class TestTransitionIssue:
     def test_can_move_to_blocked_regardless_of_counter(self, ctv, mgr,
                                                        new_issue):
         blocker = mgr.create_issue(space_id=ctv.space_id, title="blocker",
-                                   description="d", status=IssueStatus.TODO)
+                                   description="d", status=IssueStatus.TODO,
+                                   creator="tester")
         mgr.add_issue_blocker(blocking_issue_space_id=ctv.space_id,
                               blocking_issue_id=blocker.issue_id,
                               blocked_issue_space_id=ctv.space_id,
@@ -502,7 +508,8 @@ class TestDeleteIssue:
 
     def test_leaves_other_issues_alone(self, ctv, mgr, new_issue, scan_issue_rows):
         other = mgr.create_issue(space_id=ctv.space_id, title="other",
-                                 description="d", status=IssueStatus.TODO)
+                                 description="d", status=IssueStatus.TODO,
+                                 creator="tester")
 
         mgr.delete_issue(space_id=ctv.space_id, issue_id=new_issue.issue_id)
 
@@ -515,9 +522,10 @@ class TestDeleteIssue:
         monkeypatch.setattr("pl8_base.mixins.issue.gen_issue_id",
                             lambda **kwargs: "dupdup")
         mgr.create_issue(space_id=ctv.space_id, title="a", description="d",
-                         status=IssueStatus.TODO)
+                         status=IssueStatus.TODO, creator="tester")
         other = mgr.create_issue(space_id=ctv.other_space_id, title="b",
-                                 description="d", status=IssueStatus.TODO)
+                                 description="d", status=IssueStatus.TODO,
+                                 creator="tester")
 
         mgr.delete_issue(space_id=ctv.space_id, issue_id="dupdup")
 
@@ -571,14 +579,15 @@ class TestIssueCount:
     def test_create_increments_the_count(self, ctv, mgr):
         for _ in range(3):
             mgr.create_issue(space_id=ctv.space_id, title="t",
-                             description="d", status=IssueStatus.TODO)
+                             description="d", status=IssueStatus.TODO,
+                             creator="tester")
 
         assert mgr.get_space(space_id=ctv.space_id).issue_count == 3
         assert mgr.get_space(space_id=ctv.other_space_id).issue_count == 0
 
     def test_delete_decrements_the_count(self, ctv, mgr, new_issue):
         mgr.create_issue(space_id=ctv.space_id, title="t", description="d",
-                         status=IssueStatus.TODO)
+                         status=IssueStatus.TODO, creator="tester")
 
         mgr.delete_issue(space_id=ctv.space_id, issue_id=new_issue.issue_id)
 
@@ -588,7 +597,8 @@ class TestIssueCount:
         before = spaces[0]
 
         issue = mgr.create_issue(space_id=ctv.space_id, title="t",
-                                 description="d", status=IssueStatus.TODO)
+                                 description="d", status=IssueStatus.TODO,
+                                 creator="tester")
         after_create = mgr.get_space(space_id=ctv.space_id)
         mgr.delete_issue(space_id=ctv.space_id, issue_id=issue.issue_id)
         after_delete = mgr.get_space(space_id=ctv.space_id)
@@ -600,27 +610,29 @@ class TestIssueCount:
     def test_a_missing_space_refuses_the_issue(self, mgr, scan_issue_rows):
         with pytest.raises(DDBMissingError, match="Space not found"):
             mgr.create_issue(space_id="NOSUCH", title="t", description="d",
-                             status=IssueStatus.TODO)
+                             status=IssueStatus.TODO, creator="tester")
 
         assert scan_issue_rows() == []
 
     def test_a_missing_space_is_not_conjured_into_being(self, mgr, get_raw):
         with pytest.raises(DDBMissingError):
             mgr.create_issue(space_id="NOSUCH", title="t", description="d",
-                             status=IssueStatus.TODO)
+                             status=IssueStatus.TODO, creator="tester")
 
         assert get_raw("SPACE#NOSUCH", "100#INFO") is None
 
     def test_an_id_collision_counts_the_issue_once(self, ctv, mgr,
                                                    monkeypatch):
         taken = mgr.create_issue(space_id=ctv.space_id, title="original",
-                                 description="d", status=IssueStatus.TODO)
+                                 description="d", status=IssueStatus.TODO,
+                                 creator="tester")
         ids = iter([taken.issue_id, "fresh1"])
         monkeypatch.setattr("pl8_base.mixins.issue.gen_issue_id",
                             lambda **kwargs: next(ids))
 
         mgr.create_issue(space_id=ctv.space_id, title="second",
-                         description="d", status=IssueStatus.TODO)
+                         description="d", status=IssueStatus.TODO,
+                         creator="tester")
 
         assert mgr.get_space(space_id=ctv.space_id).issue_count == 2
 
@@ -638,7 +650,8 @@ class TestIssueCount:
                             wrapper)
 
         issue = mgr.create_issue(space_id=ctv.space_id, title="t",
-                                 description="d", status=IssueStatus.TODO)
+                                 description="d", status=IssueStatus.TODO,
+                                 creator="tester")
 
         assert len(calls) == 2
         assert mgr.get_issue(space_id=ctv.space_id,
@@ -674,7 +687,7 @@ def issue_entry_points(mgr, space_id):
     return [
         ("create_issue", lambda: mgr.create_issue(
             space_id=space_id, title="t", description="d",
-            status=IssueStatus.TODO)),
+            status=IssueStatus.TODO, creator="tester")),
         ("get_issue", lambda: mgr.get_issue(space_id=space_id, issue_id="abc")),
         ("get_issues_by_status", lambda: mgr.get_issues_by_status(
             space_id=space_id, status=IssueStatus.TODO)),
@@ -721,7 +734,7 @@ class TestSpaceIdValidation:
     def test_create_issue_rejects_each_bad_form(self, mgr, space_id):
         with pytest.raises(DDBArgsError):
             mgr.create_issue(space_id=space_id, title="t", description="d",
-                             status=IssueStatus.TODO)
+                             status=IssueStatus.TODO, creator="tester")
 
     def test_nothing_is_written_for_a_bad_space_id(self, mgr, scan_issue_rows):
         for _, call in issue_entry_points(mgr, "ENG#OPS"):
@@ -742,7 +755,7 @@ class TestSpaceIdValidation:
         with pytest.raises(DDBArgsError):
             mgr.create_issue(space_id=f"{ctv.space_id}#{ctv.other_space_id}",
                              title="t", description="d",
-                             status=IssueStatus.TODO)
+                             status=IssueStatus.TODO, creator="tester")
 
         assert scan_issue_rows() == []
 
@@ -752,11 +765,13 @@ class TestSpaceIdValidation:
 
     def test_valid_space_ids_still_work(self, mgr):
         for space_id in ["a", "my-space_1", "x" * 64]:
-            mgr.create_space(space_id=space_id, name="n", description="d")
+            mgr.create_space(space_id=space_id, name="n", description="d",
+                             creator="tester")
 
         for space_id in ["ENG", "a", "my-space_1", "x" * 64]:
             issue = mgr.create_issue(space_id=space_id, title="t",
-                                     description="d", status=IssueStatus.TODO)
+                                     description="d", status=IssueStatus.TODO,
+                                     creator="tester")
             assert mgr.get_issue(space_id=space_id,
                                  issue_id=issue.issue_id) == issue
 
@@ -770,13 +785,14 @@ class TestIssueStatusValidation:
     def test_create_issue_rejects_it(self, ctv, mgr, status):
         with pytest.raises(DDBArgsError, match="Invalid issue status"):
             mgr.create_issue(space_id=ctv.space_id, title="t",
-                             description="d", status=status)
+                             description="d", status=status, creator="tester")
 
     def test_create_issue_writes_no_row_for_a_bad_status(self, ctv, mgr,
                                                          scan_issue_rows):
         with pytest.raises(DDBArgsError):
             mgr.create_issue(space_id=ctv.space_id, title="t",
-                             description="d", status="NOT_A_STATUS")
+                             description="d", status="NOT_A_STATUS",
+                             creator="tester")
 
         assert scan_issue_rows() == []
 
@@ -806,7 +822,8 @@ class TestIssueStatusValidation:
         that get_issue then reports as corrupt."""
         for status in IssueStatus:
             issue = mgr.create_issue(space_id=ctv.space_id, title="t",
-                                     description="d", status=status)
+                                     description="d", status=status,
+                                     creator="tester")
             got = mgr.get_issue(space_id=ctv.space_id,
                                 issue_id=issue.issue_id)
 
@@ -816,7 +833,8 @@ class TestIssueStatusValidation:
     def test_the_bare_string_form_is_accepted_and_stored_as_the_enum(
             self, ctv, mgr):
         issue = mgr.create_issue(space_id=ctv.space_id, title="t",
-                                 description="d", status="IN_PROGRESS")
+                                 description="d", status="IN_PROGRESS",
+                                 creator="tester")
 
         assert issue.status is IssueStatus.IN_PROGRESS
         assert mgr.get_issue(space_id=ctv.space_id,

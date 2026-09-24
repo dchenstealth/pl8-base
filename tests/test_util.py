@@ -4,12 +4,14 @@
 
 import base64
 import json
+import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
 from pl8_base.const import (
+    MAX_CREATOR_LEN,
     MAX_ISSUE_ID_LEN,
     MAX_SPACE_ID_LEN,
     MIN_ISSUE_ID_LEN,
@@ -25,9 +27,11 @@ from pl8_base.util import (
     cleanup_decimals,
     decode_pagination_cursor,
     encode_pagination_cursor,
+    gen_comment_id,
     gen_issue_id,
     isotime,
     retry_on_transaction_conflict,
+    validate_creator,
     validate_issue_status,
     validate_space_id,
 )
@@ -504,3 +508,76 @@ class TestValidateSpaceId:
     def test_rejects_none(self):
         with pytest.raises(DDBArgsError, match="must be a string"):
             validate_space_id(None)
+
+
+class TestGenCommentId:
+    def test_is_a_uuidv7(self):
+        parsed = uuid.UUID(gen_comment_id(isotime()))
+
+        assert parsed.version == 7
+
+    def test_carries_the_given_timestamp(self):
+        created_at = "2026-09-24T12:00:00.123Z"
+
+        # RFC 9562 puts unix_ts_ms in the leading 48 bits
+        unix_ts_ms = uuid.UUID(gen_comment_id(created_at)).int >> 80
+
+        assert unix_ts_ms == 1790251200123
+
+    def test_round_trips_isotime_exactly(self):
+        # The id is what orders a thread, so it must carry created_at's
+        # millisecond rather than one either side of it.
+        created_at = isotime()
+
+        unix_ts_ms = uuid.UUID(gen_comment_id(created_at)).int >> 80
+        recovered = isotime(datetime.fromtimestamp(unix_ts_ms / 1000, tz=UTC))
+
+        assert recovered == created_at
+
+    def test_ids_sort_in_creation_order(self):
+        # The whole reason comments need no timestamp in their sort key.
+        stamps = [isotime(datetime(2026, 9, 24, 12, 0, second, tzinfo=UTC))
+                  for second in range(10)]
+
+        ids = [gen_comment_id(stamp) for stamp in stamps]
+
+        assert ids == sorted(ids)
+
+    def test_ids_in_one_millisecond_are_distinct(self):
+        created_at = isotime()
+
+        ids = {gen_comment_id(created_at) for _ in range(100)}
+
+        assert len(ids) == 100
+
+    def test_rejects_a_malformed_timestamp(self):
+        with pytest.raises(DDBArgsError, match="Invalid created_at"):
+            gen_comment_id("not a timestamp")
+
+    def test_rejects_a_non_string(self):
+        with pytest.raises(DDBArgsError, match="Invalid created_at"):
+            gen_comment_id(None)
+
+
+class TestValidateCreator:
+    def test_accepts_a_plain_creator(self):
+        validate_creator("alice")
+
+    def test_accepts_the_maximum_length(self):
+        validate_creator("x" * MAX_CREATOR_LEN)
+
+    def test_accepts_characters_a_space_id_may_not_use(self):
+        # A creator never composes a key, so nothing here needs excluding.
+        validate_creator("agent:claude #1 <bot@example.com>")
+
+    def test_rejects_an_empty_creator(self):
+        with pytest.raises(DDBArgsError, match="empty"):
+            validate_creator("")
+
+    def test_rejects_a_non_string(self):
+        with pytest.raises(DDBArgsError, match="must be a string"):
+            validate_creator(1)
+
+    def test_rejects_too_long(self):
+        with pytest.raises(DDBArgsError, match="too long"):
+            validate_creator("x" * (MAX_CREATOR_LEN + 1))

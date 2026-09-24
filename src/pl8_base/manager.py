@@ -19,16 +19,17 @@ from .errors import (
     DDBTransactionConflictError,
     DDBVersionConflictError,
 )
-from .mixins import IssueMixin, SpaceMixin
+from .mixins import CommentMixin, IssueMixin, SpaceMixin
 from .types import CLASS_MAP
 from .util import (
     decode_pagination_cursor,
     encode_pagination_cursor,
     isotime,
+    retry_on_transaction_conflict,
 )
 
 
-class BasePL8(IssueMixin, SpaceMixin):
+class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
     def __init__(self, *, dynamodb_client, table_name, logger):
         """Init manager.
         Args:
@@ -199,6 +200,41 @@ class BasePL8(IssueMixin, SpaceMixin):
             raise DDBMissingError(f"Item not found: PK={PK} SK={SK}")
 
         return self.parse_item(item)
+
+    @retry_on_transaction_conflict()
+    def delete_row(self, item):
+        """Delete one row by its key, tolerating it already being gone.
+
+        For sweeps, where the row was read before it was deleted and another
+        writer may have removed it in between. A failed condition means the row
+        is already gone, which is the outcome the caller wanted.
+
+        Retried on conflict at the level of this one write, for the same reason
+        as apply_idempotent_transaction.
+
+        Args:
+            item (BaseObject): the item whose row to delete
+
+        Raises:
+            DDBTransactionConflictError: if every attempt conflicts
+            DDBInternalError: internal database error
+        """
+        try:
+            self.dynamodb_client.delete_item(
+                TableName=self.table_name,
+                Key=item.serialized_pk(ts=self.ts),
+                ConditionExpression="attribute_exists(#PK)",
+                ExpressionAttributeNames={"#PK": "PK"},
+            )
+        except ClientError as exc:
+            self.raise_for_transaction_conflict(exc)
+
+            if self.is_condition_failure(exc):
+                return
+
+            self.log_client_error(exc)
+            raise DDBInternalError(
+                f"Error deleting {type(item).__name__}: {exc!s}") from exc
 
     def _build_update(self, *, PK, SK, version=None, expected_vals=None,
                       excluded_vals=None, increments=None, **attrs):
