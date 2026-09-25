@@ -12,7 +12,11 @@ from ..errors import (
     DDBSpaceNotEmptyError,
 )
 from ..types import SpaceInfo
-from ..util import retry_on_transaction_conflict, validate_space_id
+from ..util import (
+    retry_on_transaction_conflict,
+    validate_creator,
+    validate_space_id,
+)
 
 
 class SpaceMixin:
@@ -76,7 +80,7 @@ class SpaceMixin:
     # ------------------------------------------------------------------
 
     @retry_on_transaction_conflict()
-    def create_space(self, *, space_id, name, description):
+    def create_space(self, *, space_id, name, description, creator):
         """Create a Space.
 
         No id collision retry, unlike create_issue: the id is the caller's, so a
@@ -88,21 +92,26 @@ class SpaceMixin:
             space_id (str): caller-supplied id of the space
             name (str): space display name
             description (str): space description
+            creator (str): who or what is creating the Space, recorded as
+                supplied and never verified; see util.validate_creator
 
         Returns: SpaceInfo
 
         Raises:
-            DDBArgsError: if space_id is invalid, or description is not a string
+            DDBArgsError: if space_id or creator is invalid, or description is
+                not a string
             DDBExistsError: if the Space already exists
             DDBTransactionConflictError: if every attempt conflicts
             DDBInternalError: internal database error
         """
         validate_space_id(space_id)
+        validate_creator(creator)
 
         space_info = SpaceInfo(
             space_id=space_id,
             name=name,
             description=description,
+            creator=creator,
         )
 
         try:

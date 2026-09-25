@@ -31,7 +31,7 @@ def new_space(ctv, mgr):
     """A freshly created Space."""
     return mgr.create_space(space_id=ctv.space_id,
                             name="Engineering",
-                            description="test desc")
+                            description="test desc", creator="tester")
 
 
 def space_keys(space):
@@ -91,15 +91,15 @@ class TestCreateSpace:
     def test_uses_the_caller_supplied_id(self, mgr):
         # Unlike an Issue, the id is not generated, so it comes back verbatim.
         space = mgr.create_space(space_id="my-space_1", name="n",
-                                 description="d")
+                                 description="d", creator="tester")
         assert space.space_id == "my-space_1"
         assert space.PK == "SPACE#my-space_1"
 
     def test_every_space_lands_in_the_same_gsi_bucket(self, ctv, mgr, get_raw):
         first = mgr.create_space(space_id=ctv.space_id, name="a",
-                                 description="d")
+                                 description="d", creator="tester")
         second = mgr.create_space(space_id=ctv.other_space_id, name="b",
-                                  description="d")
+                                  description="d", creator="tester")
 
         assert get_raw(first.PK, first.SK)["GSI1PK"] == {"S": "SPACES"}
         assert get_raw(second.PK, second.SK)["GSI1PK"] == {"S": "SPACES"}
@@ -108,7 +108,7 @@ class TestCreateSpace:
     def test_duplicate_id_raises(self, ctv, mgr, new_space):
         with pytest.raises(DDBExistsError):
             mgr.create_space(space_id=ctv.space_id, name="second",
-                             description="second desc")
+                             description="second desc", creator="tester")
 
     def test_duplicate_id_leaves_the_existing_space_untouched(self, ctv, mgr,
                                                               new_space,
@@ -117,25 +117,27 @@ class TestCreateSpace:
         # something to reroll past the way create_issue does.
         with pytest.raises(DDBExistsError):
             mgr.create_space(space_id=ctv.space_id, name="second",
-                             description="second desc")
+                             description="second desc", creator="tester")
 
         assert len(scan_all()) == 1
         assert mgr.get_space(space_id=ctv.space_id) == new_space
 
     def test_rejects_an_invalid_id(self, mgr):
         with pytest.raises(DDBArgsError):
-            mgr.create_space(space_id="ENG#OPS", name="n", description="d")
+            mgr.create_space(space_id="ENG#OPS", name="n", description="d",
+                             creator="tester")
 
     def test_an_invalid_id_writes_nothing(self, mgr, scan_all):
         with pytest.raises(DDBArgsError):
-            mgr.create_space(space_id="ENG#OPS", name="n", description="d")
+            mgr.create_space(space_id="ENG#OPS", name="n", description="d",
+                             creator="tester")
 
         assert scan_all() == []
 
     def test_rejects_an_overlong_id(self, mgr):
         with pytest.raises(DDBArgsError):
             mgr.create_space(space_id="x" * (MAX_SPACE_ID_LEN + 1), name="n",
-                             description="d")
+                             description="d", creator="tester")
 
     def test_keyword_only(self, ctv, mgr):
         with pytest.raises(TypeError):
@@ -165,8 +167,10 @@ class TestGetSpace:
 
 class TestGetSpaces:
     def test_returns_every_space(self, ctv, mgr):
-        mgr.create_space(space_id=ctv.space_id, name="a", description="d")
-        mgr.create_space(space_id=ctv.other_space_id, name="b", description="d")
+        mgr.create_space(space_id=ctv.space_id, name="a", description="d",
+                         creator="tester")
+        mgr.create_space(space_id=ctv.other_space_id, name="b", description="d",
+                         creator="tester")
 
         spaces, _ = mgr.get_spaces()
 
@@ -182,7 +186,8 @@ class TestGetSpaces:
     def test_sorts_by_space_id(self, mgr):
         # Creation order must not leak into the listing.
         for space_id in ("ZED", "ALPHA", "MID"):
-            mgr.create_space(space_id=space_id, name=space_id, description="d")
+            mgr.create_space(space_id=space_id, name=space_id, description="d",
+                             creator="tester")
 
         spaces, _ = mgr.get_spaces()
 
@@ -190,7 +195,7 @@ class TestGetSpaces:
 
     def test_returns_fully_populated_spaces(self, ctv, mgr):
         mgr.create_space(space_id=ctv.space_id, name="Engineering",
-                         description="test desc")
+                         description="test desc", creator="tester")
 
         spaces, _ = mgr.get_spaces()
 
@@ -199,9 +204,10 @@ class TestGetSpaces:
         assert spaces[0].description == "test desc"
 
     def test_excludes_issue_rows(self, ctv, mgr):
-        mgr.create_space(space_id=ctv.space_id, name="a", description="d")
+        mgr.create_space(space_id=ctv.space_id, name="a", description="d",
+                         creator="tester")
         mgr.create_issue(space_id=ctv.space_id, title="t", description="d",
-                         status=IssueStatus.TODO)
+                         status=IssueStatus.TODO, creator="tester")
 
         spaces, _ = mgr.get_spaces()
 
@@ -209,7 +215,8 @@ class TestGetSpaces:
 
     def test_limit_is_honored(self, mgr):
         for n in range(5):
-            mgr.create_space(space_id=f"SPACE-{n}", name="n", description="d")
+            mgr.create_space(space_id=f"SPACE-{n}", name="n", description="d",
+                             creator="tester")
 
         spaces, cursor = mgr.get_spaces(limit=2)
 
@@ -218,7 +225,8 @@ class TestGetSpaces:
         assert isinstance(cursor, str)
 
     def test_no_cursor_on_the_last_page(self, ctv, mgr):
-        mgr.create_space(space_id=ctv.space_id, name="only", description="d")
+        mgr.create_space(space_id=ctv.space_id, name="only", description="d",
+                         creator="tester")
 
         spaces, cursor = mgr.get_spaces(limit=2)
 
@@ -227,7 +235,7 @@ class TestGetSpaces:
 
     def test_cursor_continues_without_overlap(self, mgr):
         created = [mgr.create_space(space_id=f"SPACE-{n}", name="n",
-                                    description="d")
+                                    description="d", creator="tester")
                    for n in range(5)]
 
         first, cursor = mgr.get_spaces(limit=2)
@@ -240,7 +248,7 @@ class TestGetSpaces:
 
     def test_full_pagination_yields_each_space_once(self, mgr):
         created = [mgr.create_space(space_id=f"SPACE-{n}", name="n",
-                                    description="d")
+                                    description="d", creator="tester")
                    for n in range(5)]
 
         spaces, pages = drain(mgr.get_spaces, limit=2)
@@ -250,7 +258,8 @@ class TestGetSpaces:
 
     def test_ordering_survives_pagination(self, mgr):
         for space_id in ("ZED", "ALPHA", "MID"):
-            mgr.create_space(space_id=space_id, name=space_id, description="d")
+            mgr.create_space(space_id=space_id, name=space_id, description="d",
+                             creator="tester")
 
         spaces, _ = drain(mgr.get_spaces, limit=1)
 
@@ -363,7 +372,8 @@ class TestDeleteSpace:
         assert get_raw(new_space.PK, new_space.SK) is None
 
     def test_drops_it_from_the_listing(self, ctv, mgr, new_space):
-        mgr.create_space(space_id=ctv.other_space_id, name="b", description="d")
+        mgr.create_space(space_id=ctv.other_space_id, name="b", description="d",
+                         creator="tester")
 
         mgr.delete_space(space_id=ctv.space_id)
 
@@ -372,7 +382,7 @@ class TestDeleteSpace:
 
     def test_leaves_other_spaces_alone(self, ctv, mgr, new_space, scan_all):
         other = mgr.create_space(space_id=ctv.other_space_id, name="b",
-                                 description="d")
+                                 description="d", creator="tester")
 
         mgr.delete_space(space_id=ctv.space_id)
 
@@ -409,7 +419,8 @@ class TestSpaceIssueIntegrity:
     def make_issue(self, ctv, mgr):
         def _make_issue(space_id=None, status=IssueStatus.TODO):
             return mgr.create_issue(space_id=space_id or ctv.space_id,
-                                    title="t", description="d", status=status)
+                                    title="t", description="d", status=status,
+                                    creator="tester")
 
         return _make_issue
 
@@ -420,7 +431,7 @@ class TestSpaceIssueIntegrity:
     def test_an_issue_needs_a_space(self, mgr, scan_all):
         with pytest.raises(DDBMissingError):
             mgr.create_issue(space_id="NOSUCH", title="t", description="d",
-                             status=IssueStatus.TODO)
+                             status=IssueStatus.TODO, creator="tester")
 
         assert scan_all() == []
 
@@ -429,7 +440,8 @@ class TestSpaceIssueIntegrity:
 
         with pytest.raises(DDBMissingError):
             mgr.create_issue(space_id=ctv.space_id, title="t",
-                             description="d", status=IssueStatus.TODO)
+                             description="d", status=IssueStatus.TODO,
+                             creator="tester")
 
     @pytest.mark.parametrize("status", list(IssueStatus))
     def test_an_issue_in_any_status_blocks_the_delete(self, ctv, mgr,
@@ -459,7 +471,7 @@ class TestSpaceIssueIntegrity:
     def test_issues_in_another_space_do_not_block_it(self, ctv, mgr,
                                                      new_space, make_issue):
         mgr.create_space(space_id=ctv.other_space_id, name="Ops",
-                         description="d")
+                         description="d", creator="tester")
         make_issue(space_id=ctv.other_space_id)
 
         mgr.delete_space(space_id=ctv.space_id)
@@ -491,7 +503,8 @@ class TestSpaceIssueIntegrity:
         # exists there.
         calls = hold_by_transaction("put_item")
 
-        mgr.create_space(space_id=ctv.space_id, name="n", description="d")
+        mgr.create_space(space_id=ctv.space_id, name="n", description="d",
+                         creator="tester")
 
         assert len(calls) == 2
         assert mgr.get_space(space_id=ctv.space_id).name == "n"

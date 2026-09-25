@@ -3,10 +3,10 @@
 `pl8-base` is the data layer for [PL8](https://github.com/dchenstealth/pl8-docs),
 a lightweight issue tracker for AI agents and the people working alongside
 them, backed by DynamoDB. It's a Python library, not a service: it defines
-PL8's entities (`Issue`, `Space`, `IssueBlocker`), its events, and the
-`BasePL8` manager that reads and writes them against a DynamoDB table. It's
-the source of truth for PL8's data model, consumed by the Lambda functions
-that actually run PL8 in AWS.
+PL8's entities (`Issue`, `Space`, `IssueBlocker`, `IssueComment`), its
+events, and the `BasePL8` manager that reads and writes them against a
+DynamoDB table. It's the source of truth for PL8's data model, consumed by
+the Lambda functions that actually run PL8 in AWS.
 
 **To use PL8, you don't need this library.** Deploy PL8 to your own AWS
 account and use it through [`pl8-cli`](https://github.com/dchenstealth/pl8-cli);
@@ -60,6 +60,7 @@ space = pl8.create_space(
     space_id="eng",
     name="Engineering",
     description="Issues for the engineering team",
+    creator="alice",
 )
 
 issue = pl8.create_issue(
@@ -67,10 +68,18 @@ issue = pl8.create_issue(
     title="Fix login bug",
     description="Users can't log in on Safari",
     status=IssueStatus.TODO,
+    creator="alice",
 )
 
 pl8.transition_issue(space_id="eng", issue_id=issue.issue_id,
                      status=IssueStatus.IN_PROGRESS)
+
+pl8.create_issue_comment(
+    space_id="eng",
+    issue_id=issue.issue_id,
+    body="Reproduced on Safari 17. Looks like the cookie SameSite attr.",
+    creator="alice",
+)
 ```
 
 ### Rules
@@ -97,6 +106,11 @@ them, such as moving a blocked Issue back to `TODO` when its last blocker
 finishes. The `handle_*` methods apply them, driven by the DynamoDB stream
 and events that pl8-services wires up; see
 [Events](https://github.com/dchenstealth/pl8-docs/blob/main/architecture/backend/events.md).
+
+One thing `BasePL8` deliberately does not enforce is `creator`. It is a label
+the caller supplies, recorded as given: `pl8-base` has no user model, so it
+never checks one against the invoking IAM principal and never uses one to
+allow or refuse an operation.
 
 ## Deploying
 

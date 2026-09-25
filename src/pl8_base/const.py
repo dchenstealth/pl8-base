@@ -11,6 +11,10 @@ RETRY_ISSUE_ID_COLLISIONS = 5
 # DynamoDB's 2048 byte limit.
 MAX_SPACE_ID_LEN = 64
 
+# Bounded only to keep a row small. Unlike a space_id a creator never composes
+# a key, so its characters are unconstrained; see util.validate_creator.
+MAX_CREATOR_LEN = 256
+
 # Full-jitter exponential backoff for TransactionConflict retries
 TRANSACT_RETRY_ATTEMPTS = 5
 TRANSACT_RETRY_BASE_DELAY = 0.05

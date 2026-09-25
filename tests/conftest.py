@@ -192,7 +192,7 @@ def spaces(ctv, mgr):
     Opt-in rather than autouse, since it writes rows; see the module docstring.
     """
     return [mgr.create_space(space_id=space_id, name=space_id,
-                             description="d")
+                             description="d", creator="tester")
             for space_id in (ctv.space_id, ctv.other_space_id)]
 
 

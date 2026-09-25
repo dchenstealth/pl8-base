@@ -53,4 +53,5 @@ class SpaceInfo(BaseObject):
     space_id: str
     name: str
     description: str
+    creator: str
     issue_count: int = 0

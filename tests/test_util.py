@@ -4,12 +4,14 @@
 
 import base64
 import json
+import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
 from pl8_base.const import (
+    MAX_CREATOR_LEN,
     MAX_ISSUE_ID_LEN,
     MAX_SPACE_ID_LEN,
     MIN_ISSUE_ID_LEN,
@@ -27,7 +29,9 @@ from pl8_base.util import (
     encode_pagination_cursor,
     gen_issue_id,
     isotime,
+    isotime_from_uuid7,
     retry_on_transaction_conflict,
+    validate_creator,
     validate_issue_status,
     validate_space_id,
 )
@@ -504,3 +508,65 @@ class TestValidateSpaceId:
     def test_rejects_none(self):
         with pytest.raises(DDBArgsError, match="must be a string"):
             validate_space_id(None)
+
+
+class TestIsotimeFromUuid7:
+    def test_reads_back_the_minting_instant(self):
+        before = isotime()
+        comment_id = str(uuid.uuid7())
+        after = isotime()
+
+        assert before <= isotime_from_uuid7(comment_id) <= after
+
+    def test_matches_isotime_formatting(self):
+        # created_at is stored and compared as a string, so the format has to
+        # be the one every other timestamp uses.
+        created_at = isotime_from_uuid7(str(uuid.uuid7()))
+
+        assert created_at.endswith("Z")
+        assert isotime(datetime.fromisoformat(created_at)) == created_at
+
+    def test_round_trips_a_known_timestamp(self):
+        # RFC 9562 puts unix_ts_ms in the leading 48 bits
+        unix_ts_ms = 1790251200123
+        comment_id = str(uuid.UUID(int=(unix_ts_ms << 80) | (0x7 << 76)
+                                   | (0b10 << 62)))
+
+        assert isotime_from_uuid7(comment_id) == "2026-09-24T12:00:00.123Z"
+
+    def test_rejects_a_malformed_id(self):
+        with pytest.raises(DDBArgsError, match="Invalid UUID"):
+            isotime_from_uuid7("not a uuid")
+
+    def test_rejects_a_non_string(self):
+        with pytest.raises(DDBArgsError, match="Invalid UUID"):
+            isotime_from_uuid7(None)
+
+    def test_rejects_a_uuid_of_another_version(self):
+        # A v4 carries no timestamp, so there is nothing to read back.
+        with pytest.raises(DDBArgsError, match="Not a UUIDv7"):
+            isotime_from_uuid7(str(uuid.uuid4()))
+
+
+class TestValidateCreator:
+    def test_accepts_a_plain_creator(self):
+        validate_creator("alice")
+
+    def test_accepts_the_maximum_length(self):
+        validate_creator("x" * MAX_CREATOR_LEN)
+
+    def test_accepts_characters_a_space_id_may_not_use(self):
+        # A creator never composes a key, so nothing here needs excluding.
+        validate_creator("agent:claude #1 <bot@example.com>")
+
+    def test_rejects_an_empty_creator(self):
+        with pytest.raises(DDBArgsError, match="empty"):
+            validate_creator("")
+
+    def test_rejects_a_non_string(self):
+        with pytest.raises(DDBArgsError, match="must be a string"):
+            validate_creator(1)
+
+    def test_rejects_too_long(self):
+        with pytest.raises(DDBArgsError, match="too long"):
+            validate_creator("x" * (MAX_CREATOR_LEN + 1))

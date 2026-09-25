@@ -18,11 +18,12 @@ from ..errors import (
     DDBStillBlockedError,
     DDBTerminalStatusError,
 )
-from ..types import IssueBlocker, IssueInfo, IssueStatus
+from ..types import IssueBlocker, IssueComment, IssueInfo, IssueStatus
 from ..util import (
     gen_issue_id,
     isotime,
     retry_on_transaction_conflict,
+    validate_creator,
     validate_issue_status,
     validate_space_id,
 )
@@ -52,6 +53,12 @@ class IssueMixin:
     in the same transaction as the Issue write. That is what refuses an Issue
     in a missing Space and what lets delete_space refuse a Space that still
     has Issues; see SpaceMixin.
+
+    An Issue holds num_comments over its own IssueComments the same way, but
+    the rule it enforces is the opposite one: a Space refuses to be deleted
+    while it holds Issues, whereas an Issue is deleted whatever its
+    num_comments and handle_issue_deleted sweeps the comments after it. See
+    CommentMixin.
     """
 
     # ------------------------------------------------------------------
@@ -73,6 +80,36 @@ class IssueMixin:
         return {
             "PK": self.ts.serialize(issue_blocker.PK),
             "SK": self.ts.serialize(issue_blocker.SK),
+        }
+
+    def issue_num_comments_update(self, space_id, issue_id, delta):
+        """Update dict adding delta to an Issue's num_comments.
+
+        For a transaction alongside the comment write it counts. The condition
+        on the Issue existing is also what refuses a comment whose Issue is
+        missing, and so what keeps a comment from being written into a
+        partition no Issue owns.
+
+        Built by hand rather than with _build_update, which bumps version and
+        updated_at, for the same reason space_issue_count_update is: an Issue's
+        version fences update_issue and transition_issue, and commenting is not
+        an edit to the Issue itself, so comment traffic must not fail a
+        concurrent version-fenced write with a spurious
+        DDBVersionConflictError.
+        """
+        return {
+            "TableName": self.table_name,
+            "Key": self.issue_info_key(space_id, issue_id),
+            "UpdateExpression": "ADD #num_comments :delta",
+            "ConditionExpression": "attribute_exists(#PK)",
+            "ExpressionAttributeNames": {
+                "#PK": "PK",
+                "#num_comments": "num_comments",
+            },
+            "ExpressionAttributeValues": {
+                ":delta": self.serialize_value(delta),
+            },
+            "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
         }
 
     def status_attrs(self, *, space_id, issue_id, status):
@@ -127,7 +164,7 @@ class IssueMixin:
     # ------------------------------------------------------------------
 
     @retry_on_transaction_conflict()
-    def create_issue(self, *, space_id, title, description, status):
+    def create_issue(self, *, space_id, title, description, status, creator):
         """Create an Issue and count it against its Space.
 
         The Space row takes a write for every Issue created in it, so
@@ -138,18 +175,21 @@ class IssueMixin:
             title (str): issue title
             description (str): issue description
             status (str or IssueStatus): issue status
+            creator (str): who or what is creating the Issue, recorded as
+                supplied and never verified; see util.validate_creator
 
         Returns: IssueInfo
 
         Raises:
-            DDBArgsError: if space_id or status is invalid, or description is
-                not a string
+            DDBArgsError: if space_id, status or creator is invalid, or
+                description is not a string
             DDBMissingError: if the Space does not exist
             DDBIdCollisionError: Collision error on issue_id
             DDBTransactionConflictError: if every attempt conflicts
             DDBInternalError: internal database error
         """
         validate_space_id(space_id)
+        validate_creator(creator)
         status = validate_issue_status(status)
 
         for _ in range(RETRY_ISSUE_ID_COLLISIONS):
@@ -160,6 +200,7 @@ class IssueMixin:
                 title=title,
                 description=description,
                 status=status,
+                creator=creator,
             )
 
             # Ordering is load-bearing: CancellationReasons come back
@@ -294,6 +335,41 @@ class IssueMixin:
                 ":pk": self.ts.serialize(pk),
                 ":sk": self.ts.serialize(BLOCKER_SK_PREFIX),
             },
+        }, cursor=cursor, limit=limit)
+
+    def get_issue_partition(self, *, space_id, issue_id, limit=None,
+                            cursor=None):
+        """One page of every row in an Issue's partition, read consistently.
+
+        For the delete sweep, which must see every row the Issue owns: its
+        comments, its outbound IssueBlockers, and the info row itself if it is
+        somehow still there. Reading them as one query rather than as a query
+        per row type is what makes the sweep a single view of the partition
+        instead of several taken at different moments.
+
+        ConsistentRead, unlike every other query here. The sweep runs once and
+        nothing retries it, so a row missing from an eventually-consistent page
+        is a row that outlives its Issue for good. The set is closed by then,
+        since neither a comment nor a blocker can be written against an Issue
+        whose info row is gone, so a consistent read is guaranteed to be
+        complete rather than merely likely to be.
+
+        Returns:
+            tuple: (list[BaseObject], str or None)
+
+        Raises:
+            DDBArgsError: if space_id or cursor is invalid
+            DDBInternalError: internal database error
+        """
+        validate_space_id(space_id)
+
+        return self.run_query({
+            "KeyConditionExpression": "#pk = :pk",
+            "ExpressionAttributeNames": {"#pk": "PK"},
+            "ExpressionAttributeValues": {
+                ":pk": self.ts.serialize(self.issue_pk(space_id, issue_id)),
+            },
+            "ConsistentRead": True,
         }, cursor=cursor, limit=limit)
 
     @retry_on_transaction_conflict()
@@ -700,30 +776,71 @@ class IssueMixin:
 
         Triggered by an SQS event; see the IssueMixin docstring for the path.
 
-        No IssueBlocker may outlive either Issue it names, so both directions
-        are swept. Delivery is at-least-once and unordered, so every write
-        conditions on the state it expects and a duplicate event is a no-op.
+        Nothing the Issue owned may outlive it: no IssueComment, and no
+        IssueBlocker naming it in either direction. Delivery is at-least-once
+        and unordered, so every write conditions on the state it expects and a
+        duplicate event is a no-op.
 
         Raises:
             DDBArgsError: if space_id is invalid
         """
         validate_space_id(space_id)
 
-        # Phase 1, Issues this Issue was blocking. These rows live in this
-        # Issue's own partition.
-        for issue_blocker in self.paginate(self.get_issue_blocking,
-                                           space_id=space_id,
-                                           blocking_issue_id=issue_id):
-            self.delete_blocker_for_sweep(issue_blocker)
+        # Phase 1, everything in this Issue's own partition: its IssueComments
+        # and the IssueBlockers it held over other Issues. One consistent
+        # query, so the sweep acts on a single complete view of the partition
+        # rather than on a page per row type; see get_issue_partition.
+        for item in self.paginate(self.get_issue_partition, space_id=space_id,
+                                  issue_id=issue_id):
+            if isinstance(item, IssueInfo):
+                # The info row is deleted before this event is sent, so an
+                # Issue standing here is a live Issue that has taken the same
+                # id, and the rows around it cannot be told apart from its own.
+                # Sweeping them would delete live data, and deleting the info
+                # row would strand its Space's issue_count, so leave the
+                # partition alone.
+                #
+                # The deleted Issue's rows are then stranded instead: they stay
+                # in the partition and the new Issue inherits them, including a
+                # num_comments that counts comments written on the old Issue.
+                # Accepted rather than fixed, because reaching it needs a fresh
+                # issue_id to collide with this one, in the same Space, in the
+                # seconds between the delete and this sweep, and an issue_id is
+                # 6 characters drawn from 62.
+                self.logger.warning(
+                    "Skipping sweep of a live Issue partition",
+                    space_id=space_id, issue_id=issue_id)
+                return
+
+            if isinstance(item, IssueBlocker):
+                self.delete_blocker_for_sweep(item)
+            elif isinstance(item, IssueComment):
+                # An IssueComment holds no counter of its own, and the Issue
+                # that counted it is already gone.
+                self.delete_row(item)
+            else:
+                # Matched explicitly rather than swept by default: a row type
+                # added to this partition later may need a counter moved or a
+                # cascade of its own, and deleting it here because it is
+                # unrecognised would be silent data loss. Refuse instead, so
+                # the event lands in the DLQ and says what it found.
+                self.logger.error("Unexpected row in an Issue partition",
+                                  space_id=space_id, issue_id=issue_id,
+                                  row_type=type(item).__name__, SK=item.SK)
+                raise DDBInternalError(
+                    f"Unexpected {type(item).__name__} row in Issue partition "
+                    f"{space_id}#{issue_id}: {item.SK}")
 
         # Phase 2, Issues that were blocking this Issue. These rows live in the
-        # blocking Issues' partitions, so they are only reachable via GSI1. No
-        # counter update: the Issue holding num_active_blockers is the one
-        # being deleted.
+        # blocking Issues' partitions, so they are only reachable via GSI1 and
+        # cannot be read consistently: a blocker added moments before the
+        # delete may not be in the index yet, and nothing retries this sweep.
+        # No counter update either way: the Issue holding num_active_blockers
+        # is the one being deleted.
         for issue_blocker in self.paginate(self.get_issue_blockers,
                                            space_id=space_id,
                                            blocked_issue_id=issue_id):
-            self.delete_blocker_row(issue_blocker)
+            self.delete_row(issue_blocker)
 
     def delete_blocker_for_sweep(self, issue_blocker):
         """Delete one outbound IssueBlocker, decrementing if it was active.
@@ -755,37 +872,7 @@ class IssueMixin:
         # was decremented when the blocking Issue went DONE, or the blocked
         # Issue is itself gone and has no counter left to hold. Both leave the
         # row to delete without a decrement.
-        self.delete_blocker_row(issue_blocker)
-
-    @retry_on_transaction_conflict()
-    def delete_blocker_row(self, issue_blocker):
-        """Delete one IssueBlocker row, tolerating it already being gone.
-
-        Retried on conflict at the level of this one write, for the same reason
-        as apply_idempotent_transaction.
-
-        Raises:
-            DDBTransactionConflictError: if every attempt conflicts
-            DDBInternalError: internal database error
-        """
-        blocker_key = self.issue_blocker_key(issue_blocker)
-
-        try:
-            self.dynamodb_client.delete_item(
-                TableName=self.table_name,
-                Key=blocker_key,
-                ConditionExpression="attribute_exists(#PK)",
-                ExpressionAttributeNames={"#PK": "PK"},
-            )
-        except ClientError as exc:
-            self.raise_for_transaction_conflict(exc)
-
-            if self.is_condition_failure(exc):
-                return
-
-            self.log_client_error(exc)
-            raise DDBInternalError(
-                f"Error deleting issue blocker: {exc!s}") from exc
+        self.delete_row(issue_blocker)
 
     @retry_on_transaction_conflict()
     def handle_issue_num_active_blockers_zeroed(self, *, space_id, issue_id):

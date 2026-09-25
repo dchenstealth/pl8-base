@@ -4,8 +4,9 @@
 
 from types import MappingProxyType
 from typing import ClassVar
+from uuid import uuid7
 
-from ..util import isotime
+from ..util import isotime, isotime_from_uuid7
 from .base import BaseObject
 from .enums import IssueStatus
 
@@ -38,11 +39,17 @@ class IssueInfo(BaseObject):
     title: str
     description: str
     status: IssueStatus
+    creator: str
     status_updated_at: str | None = None
 
     # The number of IssueBlockers blocking this Issue with is_blocking_issue_done=False
     # MUST be enforced atomically via transactions.
     num_active_blockers: int = 0
+
+    # The number of IssueComments on this Issue.
+    # MUST be enforced atomically via transactions, and MUST NOT move version;
+    # see mixins/issue.py issue_num_comments_update.
+    num_comments: int = 0
 
     def __post_init__(self):
         # status_updated_at feeds GSI1SK, so both it and created_at must be
@@ -59,6 +66,57 @@ class IssueInfo(BaseObject):
     @property
     def is_done(self):
         return self.status == IssueStatus.DONE
+
+
+class IssueComment(BaseObject):
+    """
+    Item representing a note on an Issue.
+
+    Shares the Issue's partition, so an Issue's whole thread is one query and
+    no GSI carries it. The 500 prefix sits between the Issue's own 100#INFO row
+    and its 800#BLOCKEDISSUE rows, so a bare PK query returns the Issue, then
+    its comments oldest first, then its blockers.
+
+    comment_id is a UUIDv7 and created_at is read back out of it, so ordering
+    by sort key is ordering by creation timestamp. A UUIDv7 leads with a 48 bit
+    big-endian millisecond timestamp and uuid7 counts within each millisecond
+    on top of that, so ids sort in the order they were minted. That is what
+    keeps the timestamp out of the sort key, and so what lets a comment be
+    addressed by its id alone; see util.isotime_from_uuid7.
+
+    An IssueComment MUST NOT outlive its Issue. The Issue's num_comments is
+    what holds that, atomically with every comment write, and
+    handle_issue_deleted sweeps the rows once the Issue is gone.
+    """
+    KEY_ATTRS: ClassVar[MappingProxyType] = MappingProxyType({
+        "PK": "ISSUE#{space_id}#{issue_id}",
+        "SK": "500#COMMENT#{comment_id}",
+    })
+    COMPRESSED_ATTRS: ClassVar[set[str]] = {"body"}
+
+    PK: str | None = None
+    SK: str | None = None
+    type_version: str = "0.0.1"
+
+    space_id: str
+    issue_id: str
+    body: str
+    creator: str
+    comment_id: str | None = None
+
+    def __post_init__(self):
+        # comment_id feeds SK, so it must be resolved before
+        # BaseObject.__post_init__ renders KEY_ATTRS from self.dict().
+        if not self.comment_id:
+            self.comment_id = str(uuid7())
+
+        # created_at is read back out of the id rather than taken from a second
+        # clock reading, so the two cannot disagree about when the comment was
+        # written. Setting it here also makes the base class skip it.
+        if not self.created_at:
+            self.created_at = isotime_from_uuid7(self.comment_id)
+
+        super().__post_init__()
 
 
 class IssueBlocker(BaseObject):

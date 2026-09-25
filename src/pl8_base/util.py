@@ -10,12 +10,14 @@ import re
 import secrets
 import string
 import time
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import msgspec
 
 from .const import (
+    MAX_CREATOR_LEN,
     MAX_ISSUE_ID_LEN,
     MAX_SPACE_ID_LEN,
     MIN_ISSUE_ID_LEN,
@@ -129,6 +131,65 @@ def validate_space_id(space_id):
     # straight into the key.
     if not SPACE_ID_PATTERN.fullmatch(space_id):
         raise DDBArgsError("Space ID has invalid characters")
+
+
+def isotime_from_uuid7(value):
+    """
+    The timestamp a UUIDv7 carries, rendered the way isotime renders one.
+
+    IssueComment uses this to take its created_at from its comment_id rather
+    than from a second clock reading, so the two cannot disagree about when the
+    comment was written. uuid7 mints from its own clock and takes no timestamp,
+    so this is the direction that keeps them in step.
+
+    Args:
+        value (str): a UUIDv7
+
+    Returns:
+        str: ISO-8601 timestamp, as isotime renders it
+
+    Raises:
+        DDBArgsError: if value is not a UUIDv7
+    """
+    try:
+        parsed = uuid.UUID(value)
+    except (AttributeError, TypeError, ValueError):
+        raise DDBArgsError(f"Invalid UUID: {value!r}")
+
+    if parsed.version != 7:
+        raise DDBArgsError(f"Not a UUIDv7: {value!r}")
+
+    # UUID.time is the 48 bit unix_ts_ms field for a v7
+    return isotime(datetime.fromtimestamp(parsed.time / 1000, tz=UTC))
+
+
+def validate_creator(creator):
+    """
+    Validate a caller-supplied creator.
+
+    A creator records who or what made a Space, Issue or IssueComment. PL8 has
+    no user model, so it is a label the caller supplies, never an identity PL8
+    establishes: nothing here checks it against the invoking IAM principal, and
+    no operation is allowed or refused on the basis of it. Validation is
+    therefore about keeping a sane value in the row, not about trust.
+
+    It never composes a key, unlike a space_id, so nothing constrains its
+    characters and "#" is unremarkable in one.
+
+    Args:
+        creator (str): creator to validate
+
+    Raises:
+        DDBArgsError: if the creator is not a string, is empty, or is too long
+    """
+    if not isinstance(creator, str):
+        raise DDBArgsError("Creator must be a string")
+
+    if not creator:
+        raise DDBArgsError("Creator is empty")
+
+    if len(creator) > MAX_CREATOR_LEN:
+        raise DDBArgsError("Creator too long")
 
 
 def validate_issue_status(status):

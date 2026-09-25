@@ -22,7 +22,7 @@ def make_issue(ctv, mgr):
         return mgr.create_issue(space_id=space_id or ctv.space_id,
                                 title=title,
                                 description=f"{title} desc",
-                                status=status)
+                                status=status, creator="tester")
 
     return _make
 
@@ -261,9 +261,10 @@ class TestAddIssueBlocker:
         monkeypatch.setattr("pl8_base.mixins.issue.gen_issue_id",
                             lambda **kwargs: "dupdup")
         mgr.create_issue(space_id=ctv.space_id, title="a", description="d",
-                         status=IssueStatus.TODO)
+                         status=IssueStatus.TODO, creator="tester")
         mgr.create_issue(space_id=ctv.other_space_id, title="b",
-                         description="d", status=IssueStatus.TODO)
+                         description="d", status=IssueStatus.TODO,
+                         creator="tester")
 
         mgr.add_issue_blocker(blocking_issue_space_id=ctv.space_id,
                               blocking_issue_id="dupdup",

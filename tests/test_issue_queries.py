@@ -16,7 +16,7 @@ def make_issue(ctv, mgr):
         return mgr.create_issue(space_id=space_id or ctv.space_id,
                                 title=title,
                                 description=f"{title} desc",
-                                status=status)
+                                status=status, creator="tester")
 
     return _make
 
