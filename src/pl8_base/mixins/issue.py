@@ -18,7 +18,7 @@ from ..errors import (
     DDBStillBlockedError,
     DDBTerminalStatusError,
 )
-from ..types import IssueBlocker, IssueInfo, IssueStatus
+from ..types import IssueBlocker, IssueComment, IssueInfo, IssueStatus
 from ..util import (
     gen_issue_id,
     isotime,
@@ -794,11 +794,19 @@ class IssueMixin:
                                   issue_id=issue_id):
             if isinstance(item, IssueInfo):
                 # The info row is deleted before this event is sent, so an
-                # Issue standing here is a different Issue that has taken the
-                # same id, and the rows around it are its own. Sweeping them
-                # would delete live data, and deleting the info row itself
-                # would strand its Space's issue_count. Leave the partition
-                # alone; the deleted Issue's own rows went with the id.
+                # Issue standing here is a live Issue that has taken the same
+                # id, and the rows around it cannot be told apart from its own.
+                # Sweeping them would delete live data, and deleting the info
+                # row would strand its Space's issue_count, so leave the
+                # partition alone.
+                #
+                # The deleted Issue's rows are then stranded instead: they stay
+                # in the partition and the new Issue inherits them, including a
+                # num_comments that counts comments written on the old Issue.
+                # Accepted rather than fixed, because reaching it needs a fresh
+                # issue_id to collide with this one, in the same Space, in the
+                # seconds between the delete and this sweep, and an issue_id is
+                # 6 characters drawn from 62.
                 self.logger.warning(
                     "Skipping sweep of a live Issue partition",
                     space_id=space_id, issue_id=issue_id)
@@ -806,10 +814,22 @@ class IssueMixin:
 
             if isinstance(item, IssueBlocker):
                 self.delete_blocker_for_sweep(item)
-            else:
+            elif isinstance(item, IssueComment):
                 # An IssueComment holds no counter of its own, and the Issue
                 # that counted it is already gone.
                 self.delete_row(item)
+            else:
+                # Matched explicitly rather than swept by default: a row type
+                # added to this partition later may need a counter moved or a
+                # cascade of its own, and deleting it here because it is
+                # unrecognised would be silent data loss. Refuse instead, so
+                # the event lands in the DLQ and says what it found.
+                self.logger.error("Unexpected row in an Issue partition",
+                                  space_id=space_id, issue_id=issue_id,
+                                  row_type=type(item).__name__, SK=item.SK)
+                raise DDBInternalError(
+                    f"Unexpected {type(item).__name__} row in Issue partition "
+                    f"{space_id}#{issue_id}: {item.SK}")
 
         # Phase 2, Issues that were blocking this Issue. These rows live in the
         # blocking Issues' partitions, so they are only reachable via GSI1 and

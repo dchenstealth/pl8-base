@@ -9,12 +9,13 @@ import pytest
 from botocore.exceptions import ClientError
 
 from pl8_base.errors import (
+    DDBInternalError,
     DDBMissingError,
     DDBStillBlockedError,
     DDBTerminalStatusError,
     DDBTransactionConflictError,
 )
-from pl8_base.types import IssueStatus
+from pl8_base.types import IssueStatus, SpaceInfo
 
 pytestmark = pytest.mark.usefixtures("spaces")
 
@@ -1117,3 +1118,46 @@ class TestHandleIssueDeletedSweepsComments:
                                  issue_id=issue.issue_id)
 
         assert mgr.get_space(space_id=ctv.space_id).issue_count == 1
+
+    def test_an_unexpected_row_is_refused_not_deleted(self, ctv, mgr,
+                                                      dynamodb_client,
+                                                      commented, get_raw):
+        # A row type the sweep does not know about may need a counter moved or
+        # a cascade of its own, so deleting it for being unrecognised would be
+        # silent data loss. A SpaceInfo parked in the partition stands in for
+        # whatever gets added here next: it parses, so it reaches the sweep as
+        # a typed object rather than as corruption.
+        stray = SpaceInfo(
+            space_id="STRAY", name="n", description="d", creator="tester",
+            PK=f"ISSUE#{ctv.space_id}#{commented.issue_id}",
+            SK="400#STRAY",
+        )
+        dynamodb_client.put_item(TableName=ctv.table_name,
+                                 Item=stray.serialize())
+
+        with pytest.raises(DDBInternalError, match="Unexpected SpaceInfo row"):
+            mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                     issue_id=commented.issue_id)
+
+        # get_raw rather than scan_issue_rows, which filters SpaceInfo out
+        assert get_raw(f"ISSUE#{ctv.space_id}#{commented.issue_id}",
+                       "400#STRAY") is not None
+
+    def test_an_unexpected_row_names_itself(self, ctv, mgr, dynamodb_client,
+                                            commented):
+        # The event ends up in the DLQ, so the message is the whole diagnosis.
+        stray = SpaceInfo(
+            space_id="STRAY", name="n", description="d", creator="tester",
+            PK=f"ISSUE#{ctv.space_id}#{commented.issue_id}",
+            SK="400#STRAY",
+        )
+        dynamodb_client.put_item(TableName=ctv.table_name,
+                                 Item=stray.serialize())
+
+        with pytest.raises(DDBInternalError) as raised:
+            mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                     issue_id=commented.issue_id)
+
+        assert ctv.space_id in str(raised.value)
+        assert commented.issue_id in str(raised.value)
+        assert "400#STRAY" in str(raised.value)

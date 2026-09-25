@@ -247,8 +247,11 @@ class CommentMixin:
                     "IssueComment not found: "
                     f"{space_id}#{issue_id}#{comment_id}") from exc
 
-            # Unreachable while the invariant holds: a counted comment cannot
-            # outlive the Issue that counted it.
+            # Reachable in the window between an Issue being deleted and
+            # handle_issue_deleted sweeping its comments: the comment row is
+            # still there, but the Issue holding num_comments is not. The
+            # transaction rolls back, so the row stays for the sweep to remove,
+            # and the caller is told the Issue is gone rather than the comment.
             failed, _ = self.failed_reason_item(exc, 1)
             if failed:
                 raise DDBMissingError(

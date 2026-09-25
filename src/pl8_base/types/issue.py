@@ -6,7 +6,7 @@ from types import MappingProxyType
 from typing import ClassVar
 from uuid import uuid7
 
-from ..util import comment_created_at, isotime
+from ..util import isotime, isotime_from_uuid7
 from .base import BaseObject
 from .enums import IssueStatus
 
@@ -82,7 +82,7 @@ class IssueComment(BaseObject):
     big-endian millisecond timestamp and uuid7 counts within each millisecond
     on top of that, so ids sort in the order they were minted. That is what
     keeps the timestamp out of the sort key, and so what lets a comment be
-    addressed by its id alone; see util.comment_created_at.
+    addressed by its id alone; see util.isotime_from_uuid7.
 
     An IssueComment MUST NOT outlive its Issue. The Issue's num_comments is
     what holds that, atomically with every comment write, and
@@ -114,7 +114,7 @@ class IssueComment(BaseObject):
         # clock reading, so the two cannot disagree about when the comment was
         # written. Setting it here also makes the base class skip it.
         if not self.created_at:
-            self.created_at = comment_created_at(self.comment_id)
+            self.created_at = isotime_from_uuid7(self.comment_id)
 
         super().__post_init__()
 

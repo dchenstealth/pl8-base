@@ -14,7 +14,7 @@ from pl8_base.errors import (
     DDBVersionConflictError,
 )
 from pl8_base.types import IssueComment, IssueStatus
-from pl8_base.util import comment_created_at
+from pl8_base.util import isotime_from_uuid7
 
 pytestmark = pytest.mark.usefixtures("spaces")
 
@@ -71,7 +71,7 @@ class TestCreateIssueComment:
     def test_created_at_comes_from_the_id(self, comment):
         # The id is what orders the thread, so created_at is read back out of
         # it rather than taken from a second, independent clock reading.
-        assert comment_created_at(comment.comment_id) == comment.created_at
+        assert isotime_from_uuid7(comment.comment_id) == comment.created_at
 
     def test_writes_exactly_one_row(self, comment, issue, scan_issue_rows):
         # The Issue's own info row, plus the comment
@@ -540,3 +540,32 @@ class TestIssueCommentIntegrity:
         mgr.delete_issue(space_id=ctv.space_id, issue_id=issue.issue_id)
 
         assert len(scan_issue_rows()) == 1
+
+    def test_deleting_a_comment_inside_the_sweep_window_reports_the_issue(
+            self, ctv, mgr, issue, comment):
+        # The Issue is gone but handle_issue_deleted has not run yet, so the
+        # comment row is still there while the Issue holding num_comments is
+        # not. The caller is told the Issue is missing, not the comment.
+        mgr.delete_issue(space_id=ctv.space_id, issue_id=issue.issue_id)
+
+        with pytest.raises(DDBMissingError, match="Issue not found"):
+            mgr.delete_issue_comment(space_id=ctv.space_id,
+                                     issue_id=issue.issue_id,
+                                     comment_id=comment.comment_id)
+
+    def test_that_failure_leaves_the_comment_for_the_sweep(
+            self, ctv, mgr, issue, comment, scan_issue_rows):
+        # The transaction rolls back, so the row must survive to be swept
+        # rather than be half-deleted.
+        mgr.delete_issue(space_id=ctv.space_id, issue_id=issue.issue_id)
+
+        with pytest.raises(DDBMissingError):
+            mgr.delete_issue_comment(space_id=ctv.space_id,
+                                     issue_id=issue.issue_id,
+                                     comment_id=comment.comment_id)
+
+        assert len(scan_issue_rows()) == 1
+
+        mgr.handle_issue_deleted(space_id=ctv.space_id,
+                                 issue_id=issue.issue_id)
+        assert scan_issue_rows() == []

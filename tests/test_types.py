@@ -21,7 +21,7 @@ from pl8_base.types import (
     SpaceInfo,
 )
 from pl8_base.types.base import BaseObject
-from pl8_base.util import comment_created_at
+from pl8_base.util import isotime_from_uuid7
 
 
 @pytest.fixture
@@ -264,7 +264,7 @@ class TestIssueCommentKeys:
         # than taken from a second, independent clock reading.
         comment = make_comment()
 
-        assert comment_created_at(comment.comment_id) == comment.created_at
+        assert isotime_from_uuid7(comment.comment_id) == comment.created_at
 
     def test_an_explicit_created_at_is_kept(self):
         # Only a generated comment takes its timestamp from its id; a row
@@ -289,7 +289,7 @@ class TestIssueCommentKeys:
     def test_a_non_uuidv7_comment_id_is_rejected(self):
         # created_at is read out of the id, so an id with no timestamp in it
         # has nothing to give.
-        with pytest.raises(DDBArgsError, match="Invalid comment id"):
+        with pytest.raises(DDBArgsError, match="Invalid UUID"):
             make_comment(comment_id="preset")
 
     def test_sks_sort_in_minting_order(self):

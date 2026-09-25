@@ -133,31 +133,31 @@ def validate_space_id(space_id):
         raise DDBArgsError("Space ID has invalid characters")
 
 
-def comment_created_at(comment_id):
+def isotime_from_uuid7(value):
     """
-    The creation timestamp a comment id carries.
+    The timestamp a UUIDv7 carries, rendered the way isotime renders one.
 
-    A comment's created_at is read back out of its id rather than taken from a
-    second clock reading, so the two cannot disagree about when the comment was
-    written. uuid7 mints from its own clock and takes no timestamp, so this is
-    the direction that keeps them in step.
+    IssueComment uses this to take its created_at from its comment_id rather
+    than from a second clock reading, so the two cannot disagree about when the
+    comment was written. uuid7 mints from its own clock and takes no timestamp,
+    so this is the direction that keeps them in step.
 
     Args:
-        comment_id (str): a UUIDv7, as IssueComment mints it
+        value (str): a UUIDv7
 
     Returns:
         str: ISO-8601 timestamp, as isotime renders it
 
     Raises:
-        DDBArgsError: if comment_id is not a UUIDv7
+        DDBArgsError: if value is not a UUIDv7
     """
     try:
-        parsed = uuid.UUID(comment_id)
+        parsed = uuid.UUID(value)
     except (AttributeError, TypeError, ValueError):
-        raise DDBArgsError(f"Invalid comment id: {comment_id!r}")
+        raise DDBArgsError(f"Invalid UUID: {value!r}")
 
     if parsed.version != 7:
-        raise DDBArgsError(f"Comment id is not a UUIDv7: {comment_id!r}")
+        raise DDBArgsError(f"Not a UUIDv7: {value!r}")
 
     # UUID.time is the 48 bit unix_ts_ms field for a v7
     return isotime(datetime.fromtimestamp(parsed.time / 1000, tz=UTC))

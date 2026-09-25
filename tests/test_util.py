@@ -25,11 +25,11 @@ from pl8_base.types import IssueStatus
 from pl8_base.util import (
     DEFAULT_ID_ALPHABET,
     cleanup_decimals,
-    comment_created_at,
     decode_pagination_cursor,
     encode_pagination_cursor,
     gen_issue_id,
     isotime,
+    isotime_from_uuid7,
     retry_on_transaction_conflict,
     validate_creator,
     validate_issue_status,
@@ -510,18 +510,18 @@ class TestValidateSpaceId:
             validate_space_id(None)
 
 
-class TestCommentCreatedAt:
+class TestIsotimeFromUuid7:
     def test_reads_back_the_minting_instant(self):
         before = isotime()
         comment_id = str(uuid.uuid7())
         after = isotime()
 
-        assert before <= comment_created_at(comment_id) <= after
+        assert before <= isotime_from_uuid7(comment_id) <= after
 
     def test_matches_isotime_formatting(self):
         # created_at is stored and compared as a string, so the format has to
         # be the one every other timestamp uses.
-        created_at = comment_created_at(str(uuid.uuid7()))
+        created_at = isotime_from_uuid7(str(uuid.uuid7()))
 
         assert created_at.endswith("Z")
         assert isotime(datetime.fromisoformat(created_at)) == created_at
@@ -532,20 +532,20 @@ class TestCommentCreatedAt:
         comment_id = str(uuid.UUID(int=(unix_ts_ms << 80) | (0x7 << 76)
                                    | (0b10 << 62)))
 
-        assert comment_created_at(comment_id) == "2026-09-24T12:00:00.123Z"
+        assert isotime_from_uuid7(comment_id) == "2026-09-24T12:00:00.123Z"
 
     def test_rejects_a_malformed_id(self):
-        with pytest.raises(DDBArgsError, match="Invalid comment id"):
-            comment_created_at("not a uuid")
+        with pytest.raises(DDBArgsError, match="Invalid UUID"):
+            isotime_from_uuid7("not a uuid")
 
     def test_rejects_a_non_string(self):
-        with pytest.raises(DDBArgsError, match="Invalid comment id"):
-            comment_created_at(None)
+        with pytest.raises(DDBArgsError, match="Invalid UUID"):
+            isotime_from_uuid7(None)
 
     def test_rejects_a_uuid_of_another_version(self):
         # A v4 carries no timestamp, so there is nothing to read back.
-        with pytest.raises(DDBArgsError, match="not a UUIDv7"):
-            comment_created_at(str(uuid.uuid4()))
+        with pytest.raises(DDBArgsError, match="Not a UUIDv7"):
+            isotime_from_uuid7(str(uuid.uuid4()))
 
 
 class TestValidateCreator:
