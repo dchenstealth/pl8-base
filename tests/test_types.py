@@ -14,6 +14,8 @@ from pl8_base.errors import DDBArgsError
 from pl8_base.types import (
     CLASS_MAP,
     EVENT_CLASS_MAP,
+    AttachmentStatus,
+    IssueAttachment,
     IssueBlocker,
     IssueComment,
     IssueInfo,
@@ -71,6 +73,22 @@ def make_comment(**overrides):
     }
     kwargs.update(overrides)
     return IssueComment(**kwargs)
+
+
+PRESET_ATTACHMENT_ID = "0199f3a1-0000-7000-8000-0000000000a1"
+
+
+def make_attachment(**overrides):
+    kwargs = {
+        "space_id": "ENG",
+        "issue_id": "abc123",
+        "name": "report.pdf",
+        "creator": "tester",
+        "content_type": "application/pdf",
+        "size": 11,
+    }
+    kwargs.update(overrides)
+    return IssueAttachment(**kwargs)
 
 
 def make_space(**overrides):
@@ -164,6 +182,10 @@ class TestIssueInfoDefaults:
 
     def test_num_active_blockers_starts_at_zero(self):
         assert make_info().num_active_blockers == 0
+
+    def test_the_child_counters_start_at_zero(self):
+        assert make_info().num_comments == 0
+        assert make_info().num_attachments == 0
 
     def test_type_version(self):
         assert make_info().type_version == "0.0.1"
@@ -424,6 +446,256 @@ class TestIssueBlockerSerialization:
         }
 
 
+class TestAttachmentStatus:
+    def test_members(self):
+        assert set(AttachmentStatus) == {AttachmentStatus.PENDING,
+                                        AttachmentStatus.UPLOADED}
+
+    def test_is_a_str_enum(self):
+        # It is compared against a serialized condition value, so the rendered
+        # form must be the bare name with no "AttachmentStatus." prefix.
+        assert AttachmentStatus.PENDING == "PENDING"
+        assert f"{AttachmentStatus.UPLOADED}" == "UPLOADED"
+
+
+class TestIssueAttachmentKeys:
+    def test_renders_exact_keys(self):
+        attachment = make_attachment(attachment_id=PRESET_ATTACHMENT_ID)
+
+        assert attachment.PK == "ISSUE#ENG#abc123"
+        assert attachment.SK == f"600#ATTACHMENT#{PRESET_ATTACHMENT_ID}"
+
+    def test_shares_the_issues_partition(self):
+        assert make_attachment().PK == make_info().PK
+
+    def test_sorts_between_the_comments_and_the_blockers(self):
+        attachment = make_attachment()
+
+        assert make_comment().SK < attachment.SK
+        assert attachment.SK < IssueBlocker.KEY_ATTRS["SK"]
+        assert IssueInfo.KEY_ATTRS["SK"] < attachment.SK
+
+    def test_attachment_id_defaults_to_a_uuidv7(self):
+        assert uuid.UUID(make_attachment().attachment_id).version == 7
+
+    def test_created_at_comes_from_the_attachment_id(self):
+        attachment = make_attachment()
+
+        assert isotime_from_uuid7(attachment.attachment_id) == \
+            attachment.created_at
+
+    def test_an_explicit_created_at_is_kept(self):
+        attachment = make_attachment(created_at="2020-05-05T00:00:00.000Z")
+
+        assert attachment.created_at == "2020-05-05T00:00:00.000Z"
+
+    def test_attachment_id_reaches_sk(self):
+        attachment = make_attachment()
+
+        assert "None" not in attachment.SK
+        assert attachment.SK == f"600#ATTACHMENT#{attachment.attachment_id}"
+
+    def test_a_non_uuidv7_attachment_id_is_rejected(self):
+        with pytest.raises(DDBArgsError, match="Invalid UUID"):
+            make_attachment(attachment_id="preset")
+
+    def test_sks_sort_in_minting_order(self):
+        sks = [make_attachment().SK for _ in range(100)]
+
+        assert sks == sorted(sks)
+
+    def test_a_linked_attachment_renders_the_gsi_keys(self):
+        attachment = make_attachment(attachment_id=PRESET_ATTACHMENT_ID,
+                                     comment_id=PRESET_COMMENT_ID)
+
+        assert attachment.GSI1PK == \
+            f"COMMENTATTACHMENT#ENG#abc123#{PRESET_COMMENT_ID}"
+        assert attachment.GSI1SK == f"600#ATTACHMENT#{PRESET_ATTACHMENT_ID}"
+
+    def test_an_unlinked_attachment_renders_none(self):
+        # Not "...#None": the base class renders every None key attr from one
+        # snapshot, so IssueAttachment has to take that render back or every
+        # unlinked attachment would share one garbage index partition.
+        attachment = make_attachment()
+
+        assert attachment.GSI1PK is None
+        assert attachment.GSI1SK is None
+
+    def test_preset_keys_are_not_overwritten(self):
+        attachment = make_attachment(PK="PRESET#PK", SK="PRESET#SK",
+                                     GSI1PK="PRESET#GSI1PK",
+                                     GSI1SK="PRESET#GSI1SK",
+                                     comment_id=PRESET_COMMENT_ID)
+
+        assert attachment.PK == "PRESET#PK"
+        assert attachment.SK == "PRESET#SK"
+        assert attachment.GSI1PK == "PRESET#GSI1PK"
+        assert attachment.GSI1SK == "PRESET#GSI1SK"
+
+    def test_preset_gsi_keys_are_dropped_when_unlinked(self):
+        # A row can only have GSI1 keys because it had a comment_id, so this is
+        # not a state the table can produce; the invariant is still worth
+        # holding, since the keys are what the index believes.
+        attachment = make_attachment(GSI1PK="PRESET#GSI1PK",
+                                     GSI1SK="PRESET#GSI1SK")
+
+        assert attachment.GSI1PK is None
+        assert attachment.GSI1SK is None
+
+    def test_kw_only_enforced(self):
+        with pytest.raises(TypeError):
+            IssueAttachment("ENG", "abc123", "report.pdf", "tester",
+                            "application/pdf", 11)
+
+
+class TestIssueAttachmentDefaults:
+    def test_status_defaults_to_pending(self):
+        assert make_attachment().status is AttachmentStatus.PENDING
+
+    def test_comment_id_defaults_to_none(self):
+        assert make_attachment().comment_id is None
+
+    def test_expires_at_defaults_to_none(self):
+        # Set by the mixin, which is what knows the TTL; a bare object has none.
+        assert make_attachment().expires_at is None
+
+    def test_version_starts_at_one(self):
+        assert make_attachment().version == 1
+
+    def test_type_version(self):
+        assert make_attachment().type_version == "0.0.1"
+
+    def test_is_uploaded_only_for_uploaded(self):
+        assert make_attachment(
+            status=AttachmentStatus.UPLOADED).is_uploaded is True
+        assert make_attachment().is_uploaded is False
+
+
+class TestIssueAttachmentS3Key:
+    def test_renders_the_key(self):
+        attachment = make_attachment(attachment_id=PRESET_ATTACHMENT_ID)
+
+        assert attachment.s3_key == (
+            f"space/ENG/issue/abc123/attachments/{PRESET_ATTACHMENT_ID}")
+
+    def test_the_space_is_above_the_issue(self):
+        # An issue_id is only unique within its Space, so a prefix-scoped IAM
+        # policy, lifecycle rule or prefix delete would otherwise span Spaces.
+        attachment = make_attachment()
+
+        assert attachment.s3_key.startswith("space/ENG/")
+        assert attachment.s3_key.index("ENG") < attachment.s3_key.index(
+            "abc123")
+
+    def test_two_spaces_do_not_share_a_prefix(self):
+        one = make_attachment(space_id="ENG", issue_id="abc123",
+                              attachment_id=PRESET_ATTACHMENT_ID)
+        two = make_attachment(space_id="OPS", issue_id="abc123",
+                              attachment_id=PRESET_ATTACHMENT_ID)
+
+        assert one.s3_key != two.s3_key
+
+    def test_the_name_is_not_in_the_key(self):
+        attachment = make_attachment(name="quarterly report.pdf")
+
+        assert "quarterly" not in attachment.s3_key
+
+    def test_it_is_not_a_stored_field(self):
+        # Derived, like PK and SK, so a row cannot carry a key that disagrees
+        # with the format.
+        assert "s3_key" not in make_attachment().dict()
+
+
+class TestIssueAttachmentSerialization:
+    def test_row_is_tagged_with_its_type(self, ts):
+        assert make_attachment().serialize(ts=ts)["type"] == \
+            {"S": "IssueAttachment"}
+
+    def test_nothing_is_compressed(self, ts):
+        assert IssueAttachment.COMPRESSED_ATTRS == set()
+
+        item = make_attachment().serialize(ts=ts)
+        assert all("B" not in v for v in item.values())
+
+    def test_status_serializes_as_a_bare_string(self, ts):
+        item = make_attachment().serialize(ts=ts)
+
+        assert item["status"] == {"S": "PENDING"}
+
+    def test_size_serializes_as_a_number(self, ts):
+        assert make_attachment(size=11).serialize(ts=ts)["size"] == {"N": "11"}
+
+    def test_an_unlinked_attachment_omits_the_gsi_keys(self, ts):
+        # Present-with-NULL is what DynamoDB refuses on an index key, so these
+        # must be absent rather than null for the row to be writable at all.
+        item = make_attachment().serialize(ts=ts)
+
+        assert "GSI1PK" not in item
+        assert "GSI1SK" not in item
+
+    def test_a_linked_attachment_carries_them(self, ts):
+        item = make_attachment(comment_id=PRESET_COMMENT_ID).serialize(ts=ts)
+
+        assert item["GSI1PK"]["S"].endswith(PRESET_COMMENT_ID)
+        assert "GSI1SK" in item
+
+    def test_comment_id_still_serializes_as_null(self, ts):
+        # Only key attrs are dropped when None: an ordinary field has to
+        # survive as a NULL, or from_item could not tell it from a field that
+        # was never stored.
+        item = make_attachment().serialize(ts=ts)
+
+        assert item["comment_id"] == {"NULL": True}
+
+    def test_expires_at_serializes_as_null_when_unset(self, ts):
+        assert make_attachment().serialize(ts=ts)["expires_at"] == \
+            {"NULL": True}
+
+    def test_round_trip_unlinked(self, ts, td):
+        attachment = make_attachment()
+
+        assert IssueAttachment.from_item(attachment.serialize(ts=ts),
+                                        td=td) == attachment
+
+    def test_round_trip_linked(self, ts, td):
+        attachment = make_attachment(comment_id=PRESET_COMMENT_ID,
+                                     status=AttachmentStatus.UPLOADED,
+                                     expires_at=None, version=3)
+
+        assert IssueAttachment.from_item(attachment.serialize(ts=ts),
+                                        td=td) == attachment
+
+    def test_round_trip_restores_the_status_enum(self, ts, td):
+        loaded = IssueAttachment.from_item(
+            make_attachment().serialize(ts=ts), td=td)
+
+        assert loaded.status is AttachmentStatus.PENDING
+
+    def test_round_trip_restores_int_not_decimal(self, ts, td):
+        loaded = IssueAttachment.from_item(
+            make_attachment(size=11, expires_at=1790000000).serialize(ts=ts),
+            td=td)
+
+        assert isinstance(loaded.size, int)
+        assert isinstance(loaded.expires_at, int)
+
+    def test_serialized_pk_is_primary_key_only(self, ts):
+        attachment = make_attachment(attachment_id=PRESET_ATTACHMENT_ID)
+
+        assert attachment.serialized_pk(ts=ts) == {
+            "PK": {"S": "ISSUE#ENG#abc123"},
+            "SK": {"S": f"600#ATTACHMENT#{PRESET_ATTACHMENT_ID}"},
+        }
+
+    def test_public_dict_omits_the_key_attrs(self, ts):
+        attachment = make_attachment(comment_id=PRESET_COMMENT_ID)
+        public = attachment.public_dict()
+
+        for attr in attachment.KEY_ATTRS:
+            assert attr not in public
+        assert public["comment_id"] == PRESET_COMMENT_ID
+
+
 class TestSpaceInfoKeys:
     def test_renders_exact_keys(self):
         space = make_space()
@@ -559,7 +831,8 @@ class TestPublicExports:
         assert mapped <= set(pl8_base.types.__all__)
 
     def test_exports_nothing_beyond_the_maps_and_the_named_extras(self):
-        extras = {"CLASS_MAP", "EVENT_CLASS_MAP", "BaseEvent", "IssueStatus"}
+        extras = {"CLASS_MAP", "EVENT_CLASS_MAP", "BaseEvent", "IssueStatus",
+                  "AttachmentStatus"}
         mapped = set(CLASS_MAP) | set(EVENT_CLASS_MAP)
 
         assert set(pl8_base.types.__all__) == mapped | extras

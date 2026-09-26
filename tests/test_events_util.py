@@ -5,12 +5,32 @@
 import json
 
 import boto3
+import msgspec
 import pytest
 from moto import mock_aws
 
 from pl8_base.errors import EventCorruptedError, EventSendError
 from pl8_base.types import EVENT_CLASS_MAP, IssueDeleted
 from pl8_base.util import parse_event, send_event
+
+# Every event's payload is ids, so a test event is built by name rather than
+# case by case: a new event type that names another id needs a value here and
+# nothing else.
+EVENT_ID_VALUES = {
+    "space_id": "sp1",
+    "issue_id": "iss1",
+    "comment_id": "0199f3a1-0000-7000-8000-000000000001",
+    "attachment_id": "0199f3a1-0000-7000-8000-0000000000a1",
+}
+
+
+def make_event(event_cls, **overrides):
+    """An instance of any BaseEvent subclass, with its id fields filled."""
+    kwargs = {field.name: EVENT_ID_VALUES[field.name]
+              for field in msgspec.structs.fields(event_cls)
+              if field.name in EVENT_ID_VALUES}
+    kwargs.update(overrides)
+    return event_cls(**kwargs)
 
 
 class FakeEventsClient:
@@ -67,7 +87,7 @@ def test_send_event_against_real_eventbridge_client():
 
 @pytest.mark.parametrize("event_cls", EVENT_CLASS_MAP.values())
 def test_parse_event_round_trips_each_event_type(event_cls):
-    event = event_cls(space_id="sp1", issue_id="iss1")
+    event = make_event(event_cls)
 
     assert parse_event(event.dict()) == event
 

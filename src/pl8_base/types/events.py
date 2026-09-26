@@ -103,3 +103,33 @@ class IssueReady(BaseEvent):
 
     space_id: str
     issue_id: str
+
+
+class IssueCommentDeleted(BaseEvent):
+    """Core lifecycle event.
+
+    Sent when an IssueComment is deleted. Triggers the IssueAttachments linked
+    to that comment to be deleted, which in turn drives their S3 objects away
+    via IssueAttachmentDeleted. No counter moves: the comment that held
+    num_attachments over them is the row that is already gone.
+    """
+    type_version: str = "0.0.1"
+
+    space_id: str
+    issue_id: str
+    comment_id: str
+
+
+class IssueAttachmentDeleted(BaseEvent):
+    """Core lifecycle event.
+
+    Sent when an IssueAttachment row is deleted, however it was deleted: by a
+    caller, by one of the delete sweeps, or by DynamoDB's TTL reaping an upload
+    that was never confirmed. Triggers the S3 object to be deleted, so the
+    bytes never outlive the row that named them.
+    """
+    type_version: str = "0.0.1"
+
+    space_id: str
+    issue_id: str
+    attachment_id: str
