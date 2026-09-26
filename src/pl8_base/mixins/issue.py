@@ -18,7 +18,13 @@ from ..errors import (
     DDBStillBlockedError,
     DDBTerminalStatusError,
 )
-from ..types import IssueBlocker, IssueComment, IssueInfo, IssueStatus
+from ..types import (
+    IssueAttachment,
+    IssueBlocker,
+    IssueComment,
+    IssueInfo,
+    IssueStatus,
+)
 from ..util import (
     gen_issue_id,
     isotime,
@@ -59,6 +65,12 @@ class IssueMixin:
     while it holds Issues, whereas an Issue is deleted whatever its
     num_comments and handle_issue_deleted sweeps the comments after it. See
     CommentMixin.
+
+    num_attachments works the same way as num_comments, with one difference
+    worth knowing before reading the counter helpers below: an attachment is
+    counted when its bytes land rather than when its row is written, so the
+    increment is not in the same transaction as the Put and is therefore not
+    the parent-existence fence. See AttachmentMixin.
     """
 
     # ------------------------------------------------------------------
@@ -105,6 +117,71 @@ class IssueMixin:
             "ExpressionAttributeNames": {
                 "#PK": "PK",
                 "#num_comments": "num_comments",
+            },
+            "ExpressionAttributeValues": {
+                ":delta": self.serialize_value(delta),
+            },
+            "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
+        }
+
+    def issue_num_attachments_update(self, space_id, issue_id, delta):
+        """Update dict adding delta to an Issue's num_attachments.
+
+        For a transaction alongside the attachment write it counts, which is
+        confirm_issue_attachment_uploaded's or one of the deletes' rather than
+        the Put: an attachment is counted when its bytes land, not when its row
+        is written. That is the one way attachments differ from comments here;
+        see mixins/attachment.py.
+
+        The condition on the Issue existing is still what refuses to count an
+        attachment whose Issue is missing, so a counted attachment always has an
+        Issue holding the count.
+
+        Built by hand rather than with _build_update, which bumps version and
+        updated_at, for the same reason issue_num_comments_update is: an Issue's
+        version fences update_issue and transition_issue, and attaching a file
+        is not an edit to the Issue itself, so attachment traffic must not fail
+        a concurrent version-fenced write with a spurious
+        DDBVersionConflictError.
+        """
+        return {
+            "TableName": self.table_name,
+            "Key": self.issue_info_key(space_id, issue_id),
+            "UpdateExpression": "ADD #num_attachments :delta",
+            "ConditionExpression": "attribute_exists(#PK)",
+            "ExpressionAttributeNames": {
+                "#PK": "PK",
+                "#num_attachments": "num_attachments",
+            },
+            "ExpressionAttributeValues": {
+                ":delta": self.serialize_value(delta),
+            },
+            "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
+        }
+
+    def comment_num_attachments_update(self, space_id, issue_id, comment_id,
+                                       delta):
+        """Update dict adding delta to an IssueComment's num_attachments.
+
+        The comment-side twin of issue_num_attachments_update, kept beside it so
+        the two hand-built ADD forms are read together: a linked attachment
+        moves both counters in one transaction, and they must agree about their
+        form or one of them would bump a version.
+
+        Same rationale, one entity down: an IssueComment's version fences
+        update_issue_comment's body edits, and an attachment being linked to a
+        comment is not an edit to the comment, so this must not bump it. The
+        condition on the comment existing is what refuses to count an
+        attachment against a comment that is gone.
+        """
+        return {
+            "TableName": self.table_name,
+            "Key": self.comment_key(space_id, issue_id, comment_id),
+            "UpdateExpression": "ADD #num_attachments :delta",
+            "ConditionExpression": "attribute_exists(#PK)",
+            "ExpressionAttributeNames": {
+                "#PK": "PK",
+                "#num_attachments": "num_attachments",
             },
             "ExpressionAttributeValues": {
                 ":delta": self.serialize_value(delta),
@@ -768,7 +845,11 @@ class IssueMixin:
             )},
         ]
 
-        self.apply_idempotent_transaction(
+        # Unpacked and discarded rather than called bare: the return is a
+        # tuple, and which item failed does not matter here. Every condition in
+        # it describes work that only needs doing once, so a cancellation of any
+        # of them means a concurrent or replayed satisfy already did it.
+        _applied, _failed_index = self.apply_idempotent_transaction(
             items, "Error satisfying issue blocker")
 
     def handle_issue_deleted(self, *, space_id, issue_id):
@@ -776,18 +857,24 @@ class IssueMixin:
 
         Triggered by an SQS event; see the IssueMixin docstring for the path.
 
-        Nothing the Issue owned may outlive it: no IssueComment, and no
-        IssueBlocker naming it in either direction. Delivery is at-least-once
-        and unordered, so every write conditions on the state it expects and a
-        duplicate event is a no-op.
+        Nothing the Issue owned may outlive it: no IssueComment, no
+        IssueAttachment, and no IssueBlocker naming it in either direction.
+        Delivery is at-least-once and unordered, so every write conditions on
+        the state it expects and a duplicate event is a no-op.
+
+        The attachments' S3 objects are not deleted here. Each row's delete is
+        what the stream turns into an IssueAttachmentDeleted, and
+        AttachmentMixin.handle_issue_attachment_deleted removes the bytes, so
+        this sweep is only ever about rows.
 
         Raises:
             DDBArgsError: if space_id is invalid
         """
         validate_space_id(space_id)
 
-        # Phase 1, everything in this Issue's own partition: its IssueComments
-        # and the IssueBlockers it held over other Issues. One consistent
+        # Phase 1, everything in this Issue's own partition: its IssueComments,
+        # its IssueAttachments, and the IssueBlockers it held over other Issues.
+        # One consistent
         # query, so the sweep acts on a single complete view of the partition
         # rather than on a page per row type; see get_issue_partition.
         for item in self.paginate(self.get_issue_partition, space_id=space_id,
@@ -814,9 +901,34 @@ class IssueMixin:
 
             if isinstance(item, IssueBlocker):
                 self.delete_blocker_for_sweep(item)
+            elif isinstance(item, IssueAttachment):
+                # Swept with the comment's counter and without the Issue's: the
+                # Issue's info row is already gone, so there is no
+                # num_attachments left to decrement, while a linked
+                # attachment's comment may or may not still be standing.
+                #
+                # Usually it is not. This query returns the partition in sort
+                # key order, so the 500#COMMENT# rows are swept before the
+                # 600#ATTACHMENT# ones and a linked attachment's comment has
+                # typically already been deleted by the time the attachment is
+                # reached. delete_attachment_with_counters is what tells that
+                # apart from a decrement that was simply lost: it retries
+                # without the counter whose row the cancellation names, so the
+                # row goes without a decrement only when there is no row left
+                # to hold one.
+                #
+                # The S3 object is not touched here. Deleting this row is what
+                # the stream turns into an IssueAttachmentDeleted, and
+                # handle_issue_attachment_deleted deletes the bytes, so every
+                # path that removes a row cleans up the object the same way.
+                self.delete_attachment_with_counters(item, with_issue=False)
             elif isinstance(item, IssueComment):
-                # An IssueComment holds no counter of its own, and the Issue
-                # that counted it is already gone.
+                # A plain delete with no counter work. An IssueComment does hold
+                # a counter of its own now, num_attachments, but it counts rows
+                # that live in this same partition and are being swept by this
+                # same loop, so it dies with the row rather than needing to be
+                # moved first. The Issue that counted the comment is already
+                # gone, so there is nothing above it to decrement either.
                 self.delete_row(item)
             else:
                 # Matched explicitly rather than swept by default: a row type
@@ -852,10 +964,21 @@ class IssueMixin:
         through to the plain delete rather than being read as "already done".
         Treating the failure as already-applied is what would leave an
         IssueBlocker outliving the Issue that named it.
+
+        Note the direction, because AttachmentMixin's delete is its mirror image
+        and must not be built this way: the writer this races with,
+        handle_issue_done, performs the *decrement* itself, so a failed condition
+        here means the decrement has already happened and falling through to a
+        plain delete loses nothing. An attachment's competing writer, confirm,
+        performs an *increment*, so the same fall-through would drop the matching
+        decrement; see delete_attachment_with_counters.
+
+        The failed index is unpacked and ignored: either condition failing means
+        the same thing here, that this row's decrement is not ours to make.
         """
         if not issue_blocker.is_blocking_issue_done:
             blocker_key = self.issue_blocker_key(issue_blocker)
-            applied = self.apply_idempotent_transaction([
+            applied, _failed_index = self.apply_idempotent_transaction([
                 {"Delete": self.active_blocker_delete(blocker_key)},
                 {"Update": self._build_update(
                     PK=self.issue_pk(issue_blocker.blocked_issue_space_id,
@@ -935,11 +1058,30 @@ class IssueMixin:
         re-evaluates against current state, and work another writer already did
         fails its condition and is treated as applied.
 
+        Which item failed is reported, not just that one did. A cancelled
+        transaction means something different for each item in it: the same
+        cancellation that means "another writer already deleted this row" for a
+        Delete means "the row holding this counter is gone" for an Update beside
+        it, and a caller that cannot tell them apart has to guess. That guess is
+        what lost a counter decrement in
+        AttachmentMixin.delete_attachment_with_counters, which now reads the
+        index instead. CancellationReasons already carry the information
+        positionally and failed_reason_item already extracts it per index;
+        collapsing it to a bool here threw it away.
+
         Returns:
-            bool: True if the transaction was applied, False if a condition
-                failed. False does not always mean the work is done: a caller
-                whose conditions were built from a possibly stale read must
-                decide what the failure meant; see delete_blocker_for_sweep.
+            tuple: (applied, failed_index) where applied is whether the
+                transaction was applied and failed_index is the position in
+                items of the first entry whose condition failed, or None when it
+                applied. A failed condition does not always mean the work is
+                done: a caller whose conditions were built from a possibly stale
+                read must decide what the failure of that particular item meant;
+                see delete_blocker_for_sweep and
+                AttachmentMixin.delete_attachment_with_counters.
+
+                Note for anyone adapting a call site: this is a tuple, so
+                `if self.apply_idempotent_transaction(...)` is always true. Every
+                caller must unpack.
 
         Raises:
             DDBTransactionConflictError: if every attempt conflicts
@@ -953,9 +1095,9 @@ class IssueMixin:
             for index in range(len(items)):
                 failed, _ = self.failed_reason_item(exc, index)
                 if failed:
-                    return False
+                    return False, index
 
             self.log_client_error(exc)
             raise DDBInternalError(f"{message}: {exc!s}") from exc
 
-        return True
+        return True, None

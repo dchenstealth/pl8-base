@@ -55,6 +55,7 @@ def ctv():
         region="us-east-1",
         space_id="ENG",
         other_space_id="OPS",
+        bucket_name="test-attachments-bucket",
     )
 
 
@@ -87,6 +88,24 @@ def dynamodb_client(ctv, mocked_aws):
 
 
 @pytest.fixture
+def s3_client(ctv, mocked_aws):
+    """A moto-backed S3 client holding the attachments bucket.
+
+    Here rather than local to the attachment module because two modules need an
+    attachment row now: test_issue_attachments.py, and the comment-thread range
+    tests in test_issue_comments.py that prove a 600#ATTACHMENT# row cannot come
+    back from a "new comments" query.
+
+    Creating a bucket writes no DynamoDB row, so the tests that assert exact
+    table contents through scan_all() are unaffected by this; see the module
+    docstring.
+    """
+    client = boto3.client("s3", region_name=ctv.region)
+    client.create_bucket(Bucket=ctv.bucket_name)
+    return client
+
+
+@pytest.fixture
 def logger():
     """Powertools logger, not stdlib.
 
@@ -98,10 +117,20 @@ def logger():
 
 
 @pytest.fixture
-def mgr(ctv, dynamodb_client, logger):
+def mgr(ctv, dynamodb_client, logger, s3_client):
+    """The manager under test, with attachment storage configured.
+
+    s3_client and bucket_name are optional on BasePL8, so that a consumer which
+    never touches attachments need not configure S3; they are supplied here so
+    that any module can arrange an attachment. That they really are optional is
+    covered by TestStorageIsOptional in test_issue_attachments.py, which builds
+    its own manager without them.
+    """
     yield BasePL8(dynamodb_client=dynamodb_client,
                   table_name=ctv.table_name,
-                  logger=logger)
+                  logger=logger,
+                  s3_client=s3_client,
+                  bucket_name=ctv.bucket_name)
 
 
 @pytest.fixture

@@ -19,7 +19,7 @@ from .errors import (
     DDBTransactionConflictError,
     DDBVersionConflictError,
 )
-from .mixins import CommentMixin, IssueMixin, SpaceMixin
+from .mixins import AttachmentMixin, CommentMixin, IssueMixin, SpaceMixin
 from .types import CLASS_MAP
 from .util import (
     decode_pagination_cursor,
@@ -29,19 +29,38 @@ from .util import (
 )
 
 
-class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
-    def __init__(self, *, dynamodb_client, table_name, logger):
+class BasePL8(IssueMixin, CommentMixin, AttachmentMixin, SpaceMixin):
+    def __init__(self, *, dynamodb_client, table_name, logger,
+                 s3_client=None, bucket_name=None):
         """Init manager.
+
+        s3_client and bucket_name are optional, for the same reason
+        util.send_event takes its EventBridge client explicitly rather than
+        reading one off a manager: a consumer that never touches attachments
+        should not have to configure object storage to read an Issue. Every
+        other entity works with them unset.
+
+        When they are unset the attachment methods raise StorageInternalError
+        rather than AttributeError or a boto3 error about a bucket named None,
+        so a manager missing its storage configuration says so; see
+        AttachmentMixin.require_storage.
+
         Args:
             dynamodb_client (boto3.dynamodb): DynamoDB client
             table_name (str): DynamoDB table name to use
             logger (aws_lambda_powertools.Logger): injected structured
                 logger. Extra keyword args are merged into the emitted
                 JSON log record.
+            s3_client (boto3 S3 client or None): client for attachment
+                objects, required only by the attachment methods
+            bucket_name (str or None): bucket attachment objects live in,
+                required only by the attachment methods
         """
         self.dynamodb_client = dynamodb_client
         self.table_name = table_name
         self.logger = logger
+        self.s3_client = s3_client
+        self.bucket_name = bucket_name
         self.ts = TypeSerializer()
         self.td = TypeDeserializer()
 
@@ -237,7 +256,8 @@ class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
                 f"Error deleting {type(item).__name__}: {exc!s}") from exc
 
     def _build_update(self, *, PK, SK, version=None, expected_vals=None,
-                      excluded_vals=None, increments=None, **attrs):
+                      excluded_vals=None, increments=None, remove_attrs=None,
+                      **attrs):
         """Build an update dict for update_item or transact_write_items.
 
         Every write bumps version and sets updated_at. The version *condition*
@@ -272,6 +292,12 @@ class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
             increments (dict or None): attrs to add to, rather than overwrite.
                 Applied by DynamoDB, so a counter stays correct under
                 concurrent writers where a read-modify-write would not.
+            remove_attrs (iterable or None): attrs to delete from the item, as
+                one REMOVE clause on the same UpdateExpression as the SET. An
+                attr MUST NOT appear here and in attrs or increments as well:
+                DynamoDB rejects an expression that touches one path twice, so
+                that is a malformed request rather than a last-write-wins.
+                Removing an absent attr is a no-op, not an error.
             **attrs: attrs to set
 
         Returns:
@@ -295,6 +321,20 @@ class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
             expr_attr_vals[f":incr_{attr}"] = self.serialize_value(delta)
             set_clauses.append(f"#{attr} = #{attr} + :incr_{attr}")
 
+        # REMOVE, not `SET #attr = :null`. Only an absent attribute is absent:
+        # a NULL is a value, and DynamoDB's TTL, a sparse index and
+        # attribute_not_exists all read a NULL as present. Dropping
+        # ATTACHMENT_TTL_ATTR on confirm is what takes a confirmed attachment
+        # out of the reaper's reach for good, so it has to actually be gone.
+        remove_clauses = []
+        for attr in (remove_attrs or ()):
+            expr_attr_names[f"#{attr}"] = attr
+            remove_clauses.append(f"#{attr}")
+
+        update_expression = "SET " + ", ".join(set_clauses)
+        if remove_clauses:
+            update_expression += " REMOVE " + ", ".join(remove_clauses)
+
         condition_clauses = ["attribute_exists(#PK)"]
 
         if version is not None:
@@ -317,7 +357,7 @@ class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
                 "PK": self.ts.serialize(PK),
                 "SK": self.ts.serialize(SK),
             },
-            "UpdateExpression": "SET " + ", ".join(set_clauses),
+            "UpdateExpression": update_expression,
             "ConditionExpression": " AND ".join(condition_clauses),
             "ExpressionAttributeNames": expr_attr_names,
             "ExpressionAttributeValues": expr_attr_vals,

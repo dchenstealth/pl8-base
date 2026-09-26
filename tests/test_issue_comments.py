@@ -47,6 +47,42 @@ def add_comment(ctv, mgr, issue):
     return _add
 
 
+@pytest.fixture
+def initiate_attachment(ctv, mgr, issue):
+    """Start an attachment upload on this Issue, leaving a PENDING row.
+
+    Only the row matters to these tests: it is a 600#ATTACHMENT# row in the same
+    partition as the comments, which is what the comment queries must not return.
+    """
+    def _initiate(*, name="report.pdf", comment_id=None):
+        attachment, _ = mgr.initiate_issue_attachment_upload(
+            space_id=ctv.space_id, issue_id=issue.issue_id, name=name,
+            content_type="application/pdf", size=11, creator="alice",
+            comment_id=comment_id)
+        return attachment
+
+    return _initiate
+
+
+@pytest.fixture
+def attach_file(ctv, mgr, s3_client, initiate_attachment):
+    """A fully attached file: initiated, uploaded and confirmed.
+
+    Arranged through the real methods, as everywhere else, which for an
+    attachment means all three steps a caller takes.
+    """
+    def _attach(*, name="report.pdf", comment_id=None):
+        attachment = initiate_attachment(name=name, comment_id=comment_id)
+        s3_client.put_object(Bucket=ctv.bucket_name, Key=attachment.s3_key,
+                             Body=b"hello world",
+                             ContentType=attachment.content_type)
+        return mgr.confirm_issue_attachment_uploaded(
+            space_id=ctv.space_id, issue_id=attachment.issue_id,
+            attachment_id=attachment.attachment_id)
+
+    return _attach
+
+
 def reload_issue(mgr, ctv, issue):
     return mgr.get_issue(space_id=ctv.space_id, issue_id=issue.issue_id)
 
@@ -263,6 +299,45 @@ class TestGetIssueComments:
 
         assert [c.body for c in page] == ["zebra", "apple", "mango"]
 
+    def test_can_be_read_newest_first(self, ctv, mgr, issue, add_comment,
+                                      frozen_clock):
+        # Oldest first is the default, not the invariant it once was: a caller
+        # showing the latest activity on a long thread pages from the end.
+        for body in ["first", "second", "third"]:
+            add_comment(body)
+
+        page, _ = mgr.get_issue_comments(space_id=ctv.space_id,
+                                        issue_id=issue.issue_id,
+                                        ascending=False)
+
+        assert [c.body for c in page] == ["third", "second", "first"]
+
+    def test_newest_first_pages_from_the_end(self, ctv, mgr, issue,
+                                             add_comment, frozen_clock):
+        for body in ["first", "second", "third"]:
+            add_comment(body)
+
+        page, cursor = mgr.get_issue_comments(space_id=ctv.space_id,
+                                             issue_id=issue.issue_id,
+                                             limit=1, ascending=False)
+
+        assert [c.body for c in page] == ["third"]
+        assert cursor is not None
+
+    def test_the_direction_does_not_change_the_set(self, ctv, mgr, issue,
+                                                  add_comment, frozen_clock):
+        for body in ["first", "second", "third"]:
+            add_comment(body)
+
+        ascending, _ = mgr.get_issue_comments(space_id=ctv.space_id,
+                                             issue_id=issue.issue_id)
+        descending, _ = mgr.get_issue_comments(space_id=ctv.space_id,
+                                              issue_id=issue.issue_id,
+                                              ascending=False)
+
+        assert [c.comment_id for c in descending] == \
+            [c.comment_id for c in reversed(ascending)]
+
     def test_an_issue_with_no_comments_is_empty(self, ctv, mgr, issue):
         page, cursor = mgr.get_issue_comments(space_id=ctv.space_id,
                                               issue_id=issue.issue_id)
@@ -332,6 +407,122 @@ class TestGetIssueComments:
         with pytest.raises(DDBArgsError, match="invalid characters"):
             mgr.get_issue_comments(space_id="ENG#OPS",
                                    issue_id=issue.issue_id)
+
+
+class TestGetIssueCommentsAfter:
+    """The sort key range, whose upper bound is the interesting half: DynamoDB
+    permits one sort key range condition, so the range has to bound itself
+    inside the comment group rather than lean on a begins_with as well."""
+
+    @pytest.fixture
+    def thread(self, add_comment, frozen_clock):
+        return [add_comment(body) for body in ("first", "second", "third")]
+
+    def test_returns_only_what_came_after(self, ctv, mgr, issue, thread):
+        page, cursor = mgr.get_issue_comments_after(
+            space_id=ctv.space_id, issue_id=issue.issue_id,
+            last_comment_id=thread[0].comment_id)
+
+        assert [c.body for c in page] == ["second", "third"]
+        assert cursor is None
+
+    def test_excludes_the_named_comment(self, ctv, mgr, issue, thread):
+        page, _ = mgr.get_issue_comments_after(
+            space_id=ctv.space_id, issue_id=issue.issue_id,
+            last_comment_id=thread[1].comment_id)
+
+        assert thread[1].comment_id not in [c.comment_id for c in page]
+        assert [c.body for c in page] == ["third"]
+
+    def test_the_newest_comment_leaves_nothing(self, ctv, mgr, issue, thread):
+        page, cursor = mgr.get_issue_comments_after(
+            space_id=ctv.space_id, issue_id=issue.issue_id,
+            last_comment_id=thread[-1].comment_id)
+
+        assert page == []
+        assert cursor is None
+
+    def test_without_a_last_comment_id_returns_the_thread(self, ctv, mgr,
+                                                          issue, thread):
+        page, _ = mgr.get_issue_comments_after(space_id=ctv.space_id,
+                                               issue_id=issue.issue_id)
+
+        assert [c.body for c in page] == ["first", "second", "third"]
+
+    def test_returns_nothing_but_comments(self, ctv, mgr, issue, thread,
+                                          initiate_attachment, attach_file):
+        # The bound's whole purpose: an unbounded range would run past the
+        # comments into the attachment and blocker rows and parse those.
+        initiate_attachment()
+        attach_file(comment_id=thread[0].comment_id)
+        other = mgr.create_issue(space_id=ctv.space_id, title="other",
+                                 description="d", status=IssueStatus.TODO,
+                                 creator="tester")
+        mgr.add_issue_blocker(blocking_issue_space_id=ctv.space_id,
+                              blocking_issue_id=issue.issue_id,
+                              blocked_issue_space_id=ctv.space_id,
+                              blocked_issue_id=other.issue_id)
+
+        page, _ = mgr.get_issue_comments_after(
+            space_id=ctv.space_id, issue_id=issue.issue_id,
+            last_comment_id=thread[0].comment_id)
+
+        assert {type(item) for item in page} == {IssueComment}
+        assert [c.body for c in page] == ["second", "third"]
+
+    def test_the_whole_thread_form_is_bounded_too(self, ctv, mgr, issue,
+                                                  thread, initiate_attachment):
+        initiate_attachment()
+
+        page, _ = mgr.get_issue_comments_after(space_id=ctv.space_id,
+                                               issue_id=issue.issue_id)
+
+        assert {type(item) for item in page} == {IssueComment}
+
+    def test_excludes_the_issue_info_row(self, ctv, mgr, issue, thread):
+        page, _ = mgr.get_issue_comments_after(space_id=ctv.space_id,
+                                               issue_id=issue.issue_id)
+
+        assert len(page) == len(thread)
+
+    def test_is_always_ascending(self, ctv, mgr, issue, thread):
+        # "After" has one sensible order: the caller is extending a thread it
+        # already holds, from where it stopped.
+        page, _ = mgr.get_issue_comments_after(space_id=ctv.space_id,
+                                               issue_id=issue.issue_id)
+
+        assert [c.comment_id for c in page] == sorted(
+            c.comment_id for c in thread)
+
+    def test_pages_through_with_a_cursor(self, ctv, mgr, issue, thread):
+        seen = [c.body for c in mgr.paginate(mgr.get_issue_comments_after,
+                                             space_id=ctv.space_id,
+                                             issue_id=issue.issue_id,
+                                             last_comment_id=thread[0]
+                                             .comment_id,
+                                             limit=1)]
+
+        assert seen == ["second", "third"]
+
+    def test_an_issue_with_no_comments_is_empty(self, ctv, mgr, issue):
+        page, cursor = mgr.get_issue_comments_after(space_id=ctv.space_id,
+                                                    issue_id=issue.issue_id)
+
+        assert page == []
+        assert cursor is None
+
+    def test_rejects_a_last_comment_id_that_is_not_a_uuidv7(self, ctv, mgr,
+                                                            issue):
+        # It composes a sort key bound, so it cannot be arbitrary text.
+        with pytest.raises(DDBArgsError, match="Invalid UUID"):
+            mgr.get_issue_comments_after(space_id=ctv.space_id,
+                                         issue_id=issue.issue_id,
+                                         last_comment_id="nosuch")
+
+    def test_rejects_an_invalid_space_id(self, mgr, issue):
+        with pytest.raises(DDBArgsError, match="invalid characters"):
+            mgr.get_issue_comments_after(space_id="ENG#OPS",
+                                         issue_id=issue.issue_id)
 
 
 class TestUpdateIssueComment:
@@ -519,6 +710,11 @@ class TestIssueCommentIntegrity:
 
     def test_a_new_issue_counts_no_comments(self, issue):
         assert issue.num_comments == 0
+
+    def test_a_new_comment_counts_no_attachments(self, comment):
+        # The comment-side counter AttachmentMixin maintains; a fresh comment
+        # has nothing linked to it.
+        assert comment.num_attachments == 0
 
     def test_an_issue_with_comments_can_still_be_deleted(self, ctv, mgr, issue,
                                                          add_comment):

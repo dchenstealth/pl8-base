@@ -12,11 +12,24 @@ from ..errors import (
 from ..types import IssueComment
 from ..util import (
     retry_on_transaction_conflict,
+    validate_comment_id,
     validate_creator,
     validate_space_id,
 )
 
 COMMENT_SK_PREFIX = "500#COMMENT#"
+
+# Upper bound of the comment group in an Issue's partition, for the sort key
+# range get_issue_comments_after builds. "$" is the character after "#", so
+# incrementing the prefix's own final character gives a key that sorts above
+# every 500#COMMENT#<id> and below anything numbered higher. Derived from the
+# prefix rather than spelled out, so the bound cannot drift away from the keys
+# it is bounding.
+COMMENT_SK_GROUP_END = COMMENT_SK_PREFIX[:-1] + "$"
+
+# Lowest code point there is, appended to a sort key to make an inclusive bound
+# exclusive: nothing sorts between a key and that key plus a NUL.
+SK_EXCLUSIVE_SUFFIX = "\u0000"
 
 
 class CommentMixin:
@@ -25,6 +38,10 @@ class CommentMixin:
     A comment shares its Issue's partition, so a thread is one query and no GSI
     carries it. comment_id is a UUIDv7 and created_at is read back out of it,
     which is what makes sort key order creation order; see types/issue.py.
+
+    A comment MAY also have IssueAttachments linked to it, which it counts in
+    num_attachments; those rows and that counter are AttachmentMixin's, and
+    deleting a comment sweeps them through handle_issue_comment_deleted.
 
     create_issue_comment and delete_issue_comment keep the Issue's num_comments
     in step, in the same transaction as the comment write. That is what refuses
@@ -140,16 +157,30 @@ class CommentMixin:
         return self.get_primary_item(PK=self.issue_pk(space_id, issue_id),
                                      SK=self.comment_sk(comment_id))
 
-    def get_issue_comments(self, *, space_id, issue_id, limit=50, cursor=None):
-        """One page of an Issue's IssueComments, oldest first.
+    def get_issue_comments(self, *, space_id, issue_id, limit=50, cursor=None,
+                           ascending=True):
+        """One page of an Issue's IssueComments, oldest first by default.
 
-        Sorted by sort key ascending, which is by comment_id, which is by
-        creation timestamp: see types/issue.py. Nothing sorts on an updated
-        timestamp, so editing a comment does not move it in the thread.
+        Sorted by sort key, which is by comment_id, which is by creation
+        timestamp: see types/issue.py. Nothing sorts on an updated timestamp, so
+        editing a comment does not move it in the thread.
 
-        The SK prefix is what keeps the Issue's own info and blocker rows out
-        of the result. That is a key condition rather than a filter, so Limit
-        counts only comment rows.
+        Oldest first is the default rather than the invariant it once was:
+        ascending=False reads the thread newest first, which is what a caller
+        showing the latest activity on a long thread wants, and what lets it
+        page from the end without walking the whole thread. Only the direction
+        changes; the ordering is still by comment_id either way.
+
+        The SK prefix is what keeps the Issue's own info, attachment and blocker
+        rows out of the result. That is a key condition rather than a filter, so
+        Limit counts only comment rows.
+
+        Args:
+            space_id (str): id of the issue's space
+            issue_id (str): id of the issue
+            limit (int): maximum rows per page
+            cursor (str or None): pagination cursor from a previous page
+            ascending (bool): oldest first when True, newest first when False
 
         Returns:
             tuple: (list[IssueComment], str or None)
@@ -166,6 +197,87 @@ class CommentMixin:
             "ExpressionAttributeValues": {
                 ":pk": self.ts.serialize(self.issue_pk(space_id, issue_id)),
                 ":sk": self.ts.serialize(COMMENT_SK_PREFIX),
+            },
+            "ScanIndexForward": ascending,
+        }, cursor=cursor, limit=limit)
+
+    def get_issue_comments_after(self, *, space_id, issue_id,
+                                 last_comment_id=None, limit=50, cursor=None):
+        """One page of an Issue's IssueComments newer than a given comment.
+
+        For a caller syncing a thread it has already partly read: it holds the
+        id of the last comment it saw and wants what has been written since.
+
+        Always ascending, with no direction to choose, unlike
+        get_issue_comments above: "after" has only one sensible order, since the
+        caller is extending a thread it already holds from the point it
+        stopped. Reading that range backwards would hand it the newest comment
+        first and leave it to reverse the page itself.
+
+        The range is a BETWEEN on the sort key:
+
+            :start  500#COMMENT#<last_comment_id>\u0000
+            :end    500#COMMENT$
+
+        BETWEEN is inclusive at both ends, so the start bound carries a NUL to
+        push it just past the named comment's own key and exclude it; nothing
+        sorts between a key and that key plus a NUL. With no last_comment_id
+        the start is the bare prefix, which is below every comment key, so the
+        whole thread comes back.
+
+        The upper bound is the subtle half, and it is needed at all because
+        DynamoDB permits exactly one sort key range condition: `>` cannot be
+        combined with a begins_with to keep the range inside the comment group,
+        so the range has to bound itself. An unbounded `>` would run straight
+        past the comments into the other row types sharing the partition, and a
+        "new comments" call would hand back parsed IssueAttachments and
+        IssueBlockers.
+
+        COMMENT_SK_GROUP_END is that bound, and it is derived from the comment
+        prefix alone: "$" is the character after "#", so "500#COMMENT$" sorts
+        above every 500#COMMENT#<id> key and below any key with a higher group
+        number. It is the end of the comment group, not the start of whatever
+        happens to sit above it, so nothing here has to be revisited when a row
+        type is added to or removed from the partition; the numeric group
+        prefixes are what make that true. See dchenstealth/docs
+        guidelines/dynamodb_keys.md.
+
+        Args:
+            space_id (str): id of the issue's space
+            issue_id (str): id of the issue
+            last_comment_id (str or None): id of the newest comment the caller
+                already has, excluded from the result; None for the whole
+                thread
+            limit (int): maximum rows per page
+            cursor (str or None): pagination cursor from a previous page
+
+        Returns:
+            tuple: (list[IssueComment], str or None)
+
+        Raises:
+            DDBArgsError: if space_id or cursor is invalid, or last_comment_id
+                is given and is not a UUIDv7
+            DDBInternalError: internal database error
+        """
+        validate_space_id(space_id)
+
+        if last_comment_id is None:
+            start = COMMENT_SK_PREFIX
+        else:
+            # It composes a sort key bound, so an id carrying a "#" or a
+            # newline would move the range rather than fail to match in it.
+            validate_comment_id(last_comment_id)
+            start = (f"{COMMENT_SK_PREFIX}{last_comment_id}"
+                     f"{SK_EXCLUSIVE_SUFFIX}")
+
+        return self.run_query({
+            "KeyConditionExpression":
+                "#pk = :pk AND #sk BETWEEN :start AND :end",
+            "ExpressionAttributeNames": {"#pk": "PK", "#sk": "SK"},
+            "ExpressionAttributeValues": {
+                ":pk": self.ts.serialize(self.issue_pk(space_id, issue_id)),
+                ":start": self.ts.serialize(start),
+                ":end": self.ts.serialize(COMMENT_SK_GROUP_END),
             },
             "ScanIndexForward": True,
         }, cursor=cursor, limit=limit)

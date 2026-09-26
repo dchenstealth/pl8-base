@@ -2,25 +2,30 @@
 #
 # SPDX-License-Identifier: MIT
 
-from .enums import IssueStatus
+from .enums import AttachmentStatus, IssueStatus
 from .events import (
     BaseEvent,
+    IssueAttachmentDeleted,
+    IssueCommentDeleted,
     IssueDeleted,
     IssueDone,
     IssueNumActiveBlockersZeroed,
     IssueReady,
 )
-from .issue import IssueBlocker, IssueComment, IssueInfo
+from .issue import IssueAttachment, IssueBlocker, IssueComment, IssueInfo
 from .space import SpaceInfo
 
 CLASS_MAP = {
     "IssueInfo": IssueInfo,
+    "IssueAttachment": IssueAttachment,
     "IssueBlocker": IssueBlocker,
     "IssueComment": IssueComment,
     "SpaceInfo": SpaceInfo,
 }
 
 EVENT_CLASS_MAP = {
+    "IssueAttachmentDeleted": IssueAttachmentDeleted,
+    "IssueCommentDeleted": IssueCommentDeleted,
     "IssueNumActiveBlockersZeroed": IssueNumActiveBlockersZeroed,
     "IssueDeleted": IssueDeleted,
     "IssueDone": IssueDone,
@@ -34,9 +39,13 @@ EVENT_CLASS_MAP = {
 __all__ = [
     "CLASS_MAP",
     "EVENT_CLASS_MAP",
+    "AttachmentStatus",
     "BaseEvent",
+    "IssueAttachment",
+    "IssueAttachmentDeleted",
     "IssueBlocker",
     "IssueComment",
+    "IssueCommentDeleted",
     "IssueDeleted",
     "IssueDone",
     "IssueInfo",
