@@ -18,7 +18,13 @@ from ..errors import (
     DDBStillBlockedError,
     DDBTerminalStatusError,
 )
-from ..types import IssueBlocker, IssueComment, IssueInfo, IssueStatus
+from ..types import (
+    IssueAttachment,
+    IssueBlocker,
+    IssueComment,
+    IssueInfo,
+    IssueStatus,
+)
 from ..util import (
     gen_issue_id,
     isotime,
@@ -59,6 +65,12 @@ class IssueMixin:
     while it holds Issues, whereas an Issue is deleted whatever its
     num_comments and handle_issue_deleted sweeps the comments after it. See
     CommentMixin.
+
+    num_attachments works the same way as num_comments, with one difference
+    worth knowing before reading the counter helpers below: an attachment is
+    counted when its bytes land rather than when its row is written, so the
+    increment is not in the same transaction as the Put and is therefore not
+    the parent-existence fence. See AttachmentMixin.
     """
 
     # ------------------------------------------------------------------
@@ -105,6 +117,71 @@ class IssueMixin:
             "ExpressionAttributeNames": {
                 "#PK": "PK",
                 "#num_comments": "num_comments",
+            },
+            "ExpressionAttributeValues": {
+                ":delta": self.serialize_value(delta),
+            },
+            "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
+        }
+
+    def issue_num_attachments_update(self, space_id, issue_id, delta):
+        """Update dict adding delta to an Issue's num_attachments.
+
+        For a transaction alongside the attachment write it counts, which is
+        confirm_issue_attachment_uploaded's or one of the deletes' rather than
+        the Put: an attachment is counted when its bytes land, not when its row
+        is written. That is the one way attachments differ from comments here;
+        see mixins/attachment.py.
+
+        The condition on the Issue existing is still what refuses to count an
+        attachment whose Issue is missing, so a counted attachment always has an
+        Issue holding the count.
+
+        Built by hand rather than with _build_update, which bumps version and
+        updated_at, for the same reason issue_num_comments_update is: an Issue's
+        version fences update_issue and transition_issue, and attaching a file
+        is not an edit to the Issue itself, so attachment traffic must not fail
+        a concurrent version-fenced write with a spurious
+        DDBVersionConflictError.
+        """
+        return {
+            "TableName": self.table_name,
+            "Key": self.issue_info_key(space_id, issue_id),
+            "UpdateExpression": "ADD #num_attachments :delta",
+            "ConditionExpression": "attribute_exists(#PK)",
+            "ExpressionAttributeNames": {
+                "#PK": "PK",
+                "#num_attachments": "num_attachments",
+            },
+            "ExpressionAttributeValues": {
+                ":delta": self.serialize_value(delta),
+            },
+            "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
+        }
+
+    def comment_num_attachments_update(self, space_id, issue_id, comment_id,
+                                       delta):
+        """Update dict adding delta to an IssueComment's num_attachments.
+
+        The comment-side twin of issue_num_attachments_update, kept beside it so
+        the two hand-built ADD forms are read together: a linked attachment
+        moves both counters in one transaction, and they must agree about their
+        form or one of them would bump a version.
+
+        Same rationale, one entity down: an IssueComment's version fences
+        update_issue_comment's body edits, and an attachment being linked to a
+        comment is not an edit to the comment, so this must not bump it. The
+        condition on the comment existing is what refuses to count an
+        attachment against a comment that is gone.
+        """
+        return {
+            "TableName": self.table_name,
+            "Key": self.comment_key(space_id, issue_id, comment_id),
+            "UpdateExpression": "ADD #num_attachments :delta",
+            "ConditionExpression": "attribute_exists(#PK)",
+            "ExpressionAttributeNames": {
+                "#PK": "PK",
+                "#num_attachments": "num_attachments",
             },
             "ExpressionAttributeValues": {
                 ":delta": self.serialize_value(delta),
@@ -776,18 +853,24 @@ class IssueMixin:
 
         Triggered by an SQS event; see the IssueMixin docstring for the path.
 
-        Nothing the Issue owned may outlive it: no IssueComment, and no
-        IssueBlocker naming it in either direction. Delivery is at-least-once
-        and unordered, so every write conditions on the state it expects and a
-        duplicate event is a no-op.
+        Nothing the Issue owned may outlive it: no IssueComment, no
+        IssueAttachment, and no IssueBlocker naming it in either direction.
+        Delivery is at-least-once and unordered, so every write conditions on
+        the state it expects and a duplicate event is a no-op.
+
+        The attachments' S3 objects are not deleted here. Each row's delete is
+        what the stream turns into an IssueAttachmentDeleted, and
+        AttachmentMixin.handle_issue_attachment_deleted removes the bytes, so
+        this sweep is only ever about rows.
 
         Raises:
             DDBArgsError: if space_id is invalid
         """
         validate_space_id(space_id)
 
-        # Phase 1, everything in this Issue's own partition: its IssueComments
-        # and the IssueBlockers it held over other Issues. One consistent
+        # Phase 1, everything in this Issue's own partition: its IssueComments,
+        # its IssueAttachments, and the IssueBlockers it held over other Issues.
+        # One consistent
         # query, so the sweep acts on a single complete view of the partition
         # rather than on a page per row type; see get_issue_partition.
         for item in self.paginate(self.get_issue_partition, space_id=space_id,
@@ -814,6 +897,26 @@ class IssueMixin:
 
             if isinstance(item, IssueBlocker):
                 self.delete_blocker_for_sweep(item)
+            elif isinstance(item, IssueAttachment):
+                # Attempted with the comment's counter and without the Issue's,
+                # then falling back to a plain delete: the Issue's info row is
+                # already gone, so there is no num_attachments left to
+                # decrement, while a linked attachment's comment may or may not
+                # still be standing.
+                #
+                # Usually it is not. This query returns the partition in sort
+                # key order, so the 500#COMMENT# rows are swept before the
+                # 600#ATTACHMENT# ones and a linked attachment's comment has
+                # typically already been deleted by the time the attachment is
+                # reached. The condition is what makes that a fall-through to
+                # the plain delete rather than a failure, and the row goes
+                # either way; see delete_attachment_with_counters.
+                #
+                # The S3 object is not touched here. Deleting this row is what
+                # the stream turns into an IssueAttachmentDeleted, and
+                # handle_issue_attachment_deleted deletes the bytes, so every
+                # path that removes a row cleans up the object the same way.
+                self.delete_attachment_with_counters(item, with_issue=False)
             elif isinstance(item, IssueComment):
                 # An IssueComment holds no counter of its own, and the Issue
                 # that counted it is already gone.

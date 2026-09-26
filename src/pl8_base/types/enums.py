@@ -25,3 +25,32 @@ class IssueStatus(StrEnum):
     BLOCKED = "BLOCKED"
     IN_PROGRESS = "IN_PROGRESS"
     DONE = "DONE"
+
+
+class AttachmentStatus(StrEnum):
+    """IssueAttachment upload states.
+
+    An attachment row is written before its bytes exist: the row is what the
+    presigned POST is signed against, so PENDING means "an upload has been
+    authorized for this object", not "a file is attached".
+
+    UPLOADED is terminal, and the transition is one-way: an attachment MUST NOT
+    go back to PENDING. That rule is load-bearing beyond tidiness, because the
+    status is the condition the counters hang off:
+    * confirm_issue_attachment_uploaded conditions its write on
+      status = PENDING and increments IssueInfo.num_attachments, and the
+      IssueComment's when the attachment is linked, in the same transaction.
+      Event and API delivery are at-least-once, so a replayed confirm
+      re-fails that condition, the whole transaction becomes a no-op, and the
+      increment therefore happens exactly once.
+    * delete_issue_attachment conditions its decrement on status = UPLOADED for
+      the same reason in reverse: a PENDING attachment was never counted, so
+      decrementing for one would drive the counter negative.
+
+    Re-signing an upload (resign_issue_attachment_upload) deliberately does not
+    move the status: it hands out a fresh URL for a row that is still PENDING,
+    which is exactly the state that lets the eventual confirm count once.
+    """
+
+    PENDING = "PENDING"
+    UPLOADED = "UPLOADED"

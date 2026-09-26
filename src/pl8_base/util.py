@@ -17,6 +17,9 @@ from decimal import Decimal
 import msgspec
 
 from .const import (
+    MAX_ATTACHMENT_NAME_LEN,
+    MAX_ATTACHMENT_SIZE_BYTES,
+    MAX_CONTENT_TYPE_LEN,
     MAX_CREATOR_LEN,
     MAX_ISSUE_ID_LEN,
     MAX_SPACE_ID_LEN,
@@ -38,6 +41,21 @@ DEFAULT_ID_ALPHABET = string.ascii_letters + string.digits
 # Characters a caller-supplied space_id may use. Excludes "#", the separator
 # every key format string is built on.
 SPACE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+
+# Characters an attachment name MUST NOT contain: the C0 controls, DEL, and the
+# two characters that would break out of a quoted HTTP header value. See
+# validate_attachment_name; everything else, spaces and non-ASCII included, is
+# allowed, since a name is a label on the row and never part of a key.
+ATTACHMENT_NAME_FORBIDDEN = re.compile(r'[\x00-\x1f\x7f"\\]')
+
+# A media type, as "type/subtype" in RFC 9110 token characters. Parameters are
+# deliberately not accepted: the type is signed into the presigned POST policy
+# as an exact Content-Type condition, so a caller sending
+# "text/plain; charset=utf-8" against a policy signed for "text/plain" would
+# have its upload refused by S3 rather than by anything here, which is a far
+# worse error to debug. See validate_content_type.
+CONTENT_TYPE_PATTERN = re.compile(
+    r"[A-Za-z0-9!#$%&'*+.^_`|~-]+/[A-Za-z0-9!#$%&'*+.^_`|~-]+")
 
 
 def isotime(dt=None, timespec="milliseconds"):
@@ -221,6 +239,171 @@ def validate_issue_status(status):
         return IssueStatus(status)
     except ValueError:
         raise DDBArgsError(f"Invalid issue status: {status!r}")
+
+
+def validate_attachment_status(status):
+    """
+    Coerce a caller-supplied status to an AttachmentStatus member.
+
+    The same reasoning as validate_issue_status: msgspec Structs do not type
+    check on direct instantiation, so nothing downstream stops an arbitrary
+    string from reaching IssueAttachment.status. Such a row can no longer be
+    read back, since from_item does validate, so a bad argument would surface
+    later as DDBCorruptedError. Reject it here instead, while it is still an
+    argument.
+
+    Imports AttachmentStatus from .types locally rather than at module level:
+    types/events.py imports isotime from this module, so a top-level import
+    here would be circular. Same reason as validate_issue_status above.
+
+    Args:
+        status (str or AttachmentStatus): status to validate
+
+    Returns:
+        AttachmentStatus: the matching member
+
+    Raises:
+        DDBArgsError: if status is not one of the AttachmentStatus values
+    """
+    from .types import AttachmentStatus
+
+    try:
+        return AttachmentStatus(status)
+    except ValueError:
+        raise DDBArgsError(f"Invalid attachment status: {status!r}")
+
+
+def validate_comment_id(comment_id):
+    """
+    Validate a comment id.
+
+    A comment id composes a sort key twice over: 500#COMMENT#{comment_id} for
+    the comment row itself, and the COMMENTATTACHMENT#... GSI1 partition an
+    IssueAttachment is linked under. get_issue_comments_after also builds a sort
+    key range out of one. So an id carrying a "#", or a newline, would move the
+    key it composes rather than fail to match it.
+
+    Defers the whole check to isotime_from_uuid7, which already raises
+    DDBArgsError for anything that is not a UUIDv7, rather than adding a second
+    definition of what a comment id is: PL8 mints comment ids as UUIDv7s and
+    reads their creation timestamps back out of them, so "is a UUIDv7" is the
+    rule, and the characters a UUID can be spelled with are a consequence of it.
+
+    Args:
+        comment_id (str): id to validate
+
+    Raises:
+        DDBArgsError: if comment_id is not a UUIDv7
+    """
+    isotime_from_uuid7(comment_id)
+
+
+def validate_attachment_name(name):
+    """
+    Validate a caller-supplied attachment name.
+
+    The name is the human-readable filename, and it is deliberately not part of
+    the S3 key; see types/issue.py IssueAttachment.S3_KEY_FORMAT. It reaches the
+    downloader through the ResponseContentDisposition of a presigned GET, as
+    `attachment; filename="<name>"`, and that header value is *signed into* the
+    URL. A `"` would close the quoted string early and a control character, a
+    newline in particular, would end the header line, so either one is an
+    injection into a signed header the caller does not otherwise control. A
+    backslash is refused for the same reason: in a quoted string it escapes the
+    next character, so a name ending in one escapes the closing quote.
+
+    Otherwise unconstrained: spaces, punctuation and non-ASCII are all fine in
+    a filename, and unlike a space_id the name never composes a key.
+
+    Args:
+        name (str): name to validate
+
+    Raises:
+        DDBArgsError: if the name is not a string, is empty, is too long, or
+            contains a control character, a quote or a backslash
+    """
+    if not isinstance(name, str):
+        raise DDBArgsError("Attachment name must be a string")
+
+    if not name:
+        raise DDBArgsError("Attachment name is empty")
+
+    if len(name) > MAX_ATTACHMENT_NAME_LEN:
+        raise DDBArgsError("Attachment name too long")
+
+    if ATTACHMENT_NAME_FORBIDDEN.search(name):
+        raise DDBArgsError("Attachment name has invalid characters")
+
+
+def validate_content_type(content_type):
+    """
+    Validate a caller-supplied attachment content type.
+
+    The content type is signed into the presigned POST twice, as a policy
+    condition and as a field, so S3 refuses an upload that declares anything
+    else. That makes it worth checking here: a value that is not a media type
+    at all would still be signed, and the upload would fail at S3 with the
+    caller holding a URL it can never use.
+
+    Checked as a shape rather than against a list of known types. PL8 attaches
+    whatever a caller attaches and has no opinion on the format, so an
+    allowlist would only mean rejecting next year's media types.
+
+    Args:
+        content_type (str): content type to validate
+
+    Raises:
+        DDBArgsError: if the content type is not a string, is empty, is too
+            long, or is not "type/subtype" in token characters
+    """
+    if not isinstance(content_type, str):
+        raise DDBArgsError("Content type must be a string")
+
+    if not content_type:
+        raise DDBArgsError("Content type is empty")
+
+    if len(content_type) > MAX_CONTENT_TYPE_LEN:
+        raise DDBArgsError("Content type too long")
+
+    # fullmatch rather than a "$" anchored search, for the same reason
+    # validate_space_id uses one: "$" also matches before a trailing newline.
+    if not CONTENT_TYPE_PATTERN.fullmatch(content_type):
+        raise DDBArgsError("Invalid content type")
+
+
+def validate_attachment_size(size):
+    """
+    Validate a caller-supplied attachment size in bytes.
+
+    The size is declared before the bytes exist, because it becomes an exact
+    content-length-range condition in the presigned POST policy: S3 then
+    refuses a body of any other length, which is what stops a caller declaring
+    one byte and uploading a gigabyte. So this bound is enforced at signing
+    time, on a number, rather than by measuring anything.
+
+    Zero is refused along with the negatives. An empty object is representable
+    in S3, but an attachment of nothing is a caller bug far more often than an
+    intent, and a zero-length range condition is an awkward thing to have
+    signed.
+
+    A bool is refused even though it is an int in Python: True would otherwise
+    be a legal size of one byte.
+
+    Args:
+        size (int): size in bytes
+
+    Raises:
+        DDBArgsError: if size is not an int, or is outside
+            1..MAX_ATTACHMENT_SIZE_BYTES
+    """
+    if isinstance(size, bool) or not isinstance(size, int):
+        raise DDBArgsError("Attachment size must be an integer")
+
+    if size < 1:
+        raise DDBArgsError("Attachment size must be at least 1 byte")
+
+    if size > MAX_ATTACHMENT_SIZE_BYTES:
+        raise DDBArgsError("Attachment size too large")
 
 
 def encode_pagination_cursor(exclusive_start_key):

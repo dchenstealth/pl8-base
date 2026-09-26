@@ -374,7 +374,7 @@ wheels = [
 
 [[package]]
 name = "pl8-base"
-version = "0.0.5"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },

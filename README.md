@@ -3,9 +3,9 @@
 `pl8-base` is the data layer for [PL8](https://github.com/dchenstealth/pl8-docs),
 a lightweight issue tracker for AI agents and the people working alongside
 them, backed by DynamoDB. It's a Python library, not a service: it defines
-PL8's entities (`Issue`, `Space`, `IssueBlocker`, `IssueComment`), its
-events, and the `BasePL8` manager that reads and writes them against a
-DynamoDB table. It's the source of truth for PL8's data model, consumed by
+PL8's entities (`Issue`, `Space`, `IssueBlocker`, `IssueComment`,
+`IssueAttachment`), its events, and the `BasePL8` manager that reads and
+writes them against a DynamoDB table. It's the source of truth for PL8's data model, consumed by
 the Lambda functions that actually run PL8 in AWS.
 
 **To use PL8, you don't need this library.** Deploy PL8 to your own AWS
@@ -14,7 +14,7 @@ see the [setup](https://github.com/dchenstealth/pl8-docs/blob/main/user_docs/set
 and [usage](https://github.com/dchenstealth/pl8-docs/blob/main/user_docs/usage.md)
 guides. `pl8-base` is for working on PL8 itself.
 
-> **Status:** alpha (0.0.x). Interfaces may change between releases.
+> **Status:** alpha (0.x). Interfaces may change between releases.
 
 ## Getting started
 
@@ -42,6 +42,12 @@ of this package, since only your logger instance needs it, not `pl8-base`
 itself). It also expects a table already provisioned with `PK`/`SK` and a
 `GSI1` global secondary index (`GSI1PK`/`GSI1SK`) — see
 [Deploying](#deploying) below.
+
+Attachments additionally need an S3 client and a bucket, passed as the
+optional `s3_client` and `bucket_name` arguments. They are optional because
+nothing else uses them: a consumer that never touches attachments does not
+have to configure object storage, and the attachment methods raise
+`StorageInternalError` if they are called without it.
 
 ```python
 import boto3
@@ -74,11 +80,34 @@ issue = pl8.create_issue(
 pl8.transition_issue(space_id="eng", issue_id=issue.issue_id,
                      status=IssueStatus.IN_PROGRESS)
 
-pl8.create_issue_comment(
+comment = pl8.create_issue_comment(
     space_id="eng",
     issue_id=issue.issue_id,
     body="Reproduced on Safari 17. Looks like the cookie SameSite attr.",
     creator="alice",
+)
+```
+
+Attaching a file is three steps, because `pl8-base` never handles the bytes:
+initiate an upload to get a presigned POST, upload to S3 with it, then
+confirm. The attachment only counts against the Issue once it is confirmed.
+
+```python
+attachment, upload = pl8.initiate_issue_attachment_upload(
+    space_id="eng",
+    issue_id=issue.issue_id,
+    name="safari-console.png",
+    content_type="image/png",
+    size=48_210,
+    creator="alice",
+    comment_id=comment.comment_id,  # optional
+)
+
+# POST the bytes to upload["url"] with upload["fields"], then:
+pl8.confirm_issue_attachment_uploaded(
+    space_id="eng",
+    issue_id=issue.issue_id,
+    attachment_id=attachment.attachment_id,
 )
 ```
 
@@ -95,6 +124,8 @@ pl8.create_issue_comment(
 | An Issue with unfinished blockers can't leave `BLOCKED` | `DDBStillBlockedError` |
 | A `DONE` Issue can't be added as a blocker | `DDBBlockingIssueDoneError` |
 | A write passed `version=` fails if the item has changed since | `DDBVersionConflictError` |
+| An attachment upload can only be confirmed once | `DDBAttachmentStatusError` |
+| Confirming an upload that never landed in S3 | `StorageObjectMissingError` |
 
 Retrying one of these unchanged won't help. `DDBTransactionConflictError` is
 different: it means contention that `BasePL8` already retried, nothing was

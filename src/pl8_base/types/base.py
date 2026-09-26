@@ -116,11 +116,39 @@ class BaseObject(msgspec.Struct, tag=True, tag_field="type",
         return gzip.compress(value.encode())
 
     def serialize(self, *, ts=None):
+        """Serialize this object to a DynamoDB item.
+
+        A key attr whose value is None is omitted from the item entirely rather
+        than written as a NULL AttributeValue. That is what lets a type keep an
+        index sparse: IssueAttachment renders its GSI1 keys only while it is
+        linked to an IssueComment, and DynamoDB rejects a PutItem whose *index
+        key* attribute is present with the wrong type ("Type mismatch for Index
+        Key GSI1PK Expected: S Actual: NULL"), so an unlinked attachment could
+        not be written at all if msgspec's None -> NULL reached the item. With
+        the attribute absent the row is simply not in the index, which is the
+        intended behavior.
+
+        Only attrs named in KEY_ATTRS are skipped. An ordinary field set to
+        None, IssueAttachment.comment_id itself being the example, MUST still
+        serialize as NULL: from_item converts the item straight back into the
+        struct, and dropping the attribute there would be indistinguishable
+        from a field that was never stored. Narrowing this to key attrs is the
+        whole point, so "simplify" it to skipping every None and comment_id
+        stops round-tripping.
+
+        Args:
+            ts (TypeSerializer or None): serializer to use; one is made if not
+                supplied
+
+        Returns:
+            dict: DynamoDB item, as a map of attr name to AttributeValue
+        """
         if ts is None:
             ts = TypeSerializer()
 
         return {k: ts.serialize(self.compress_value(k, v))
-                for k, v in self.dict().items()}
+                for k, v in self.dict().items()
+                if v is not None or k not in self.KEY_ATTRS}
 
     def serialized_pk(self, *, ts=None):
         if ts is None:
