@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from ..const import GSI1_INDEX_NAME
 from ..errors import (
@@ -129,6 +129,9 @@ class SpaceMixin:
 
             self.log_client_error(exc)
             raise DDBInternalError(f"Error creating space: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(f"Error creating space: {exc!s}") from exc
 
         return space_info
 
@@ -251,4 +254,7 @@ class SpaceMixin:
                     f"Space {space_id} has {old.issue_count} Issues") from exc
 
             self.log_client_error(exc)
+            raise DDBInternalError(f"Error deleting space: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
             raise DDBInternalError(f"Error deleting space: {exc!s}") from exc

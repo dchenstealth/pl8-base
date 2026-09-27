@@ -4,7 +4,7 @@
 
 import msgspec
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from .const import (
     CONDITION_FAILED_CODE,
@@ -57,6 +57,22 @@ class BasePL8(IssueMixin, CommentMixin, AttachmentMixin, SpaceMixin):
         self.ts = TypeSerializer()
         self.td = TypeDeserializer()
 
+
+    def log_aws_error(self, exc):
+        """Log a failed AWS call, from whichever botocore tree it came.
+
+        A BotoCoreError, such as a connection failure, has no exc.response for
+        log_client_error to read.
+
+        Args:
+            exc (ClientError or BotoCoreError): the failure to log
+        """
+        if isinstance(exc, ClientError):
+            self.log_client_error(exc)
+            return
+
+        self.logger.exception(f"BotoCoreError ({type(exc).__name__})",
+                              error=str(exc))
 
     def log_client_error(self, exc):
         """Util method for structured AWS error logging
@@ -206,6 +222,9 @@ class BasePL8(IssueMixin, CommentMixin, AttachmentMixin, SpaceMixin):
         except ClientError as exc:
             self.log_client_error(exc)
             raise DDBInternalError(f"Error loading item: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(f"Error loading item: {exc!s}") from exc
 
         item = resp.get("Item")
         if item is None:
@@ -245,6 +264,10 @@ class BasePL8(IssueMixin, CommentMixin, AttachmentMixin, SpaceMixin):
                 return
 
             self.log_client_error(exc)
+            raise DDBInternalError(
+                f"Error deleting {type(item).__name__}: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
             raise DDBInternalError(
                 f"Error deleting {type(item).__name__}: {exc!s}") from exc
 
@@ -417,6 +440,9 @@ class BasePL8(IssueMixin, CommentMixin, AttachmentMixin, SpaceMixin):
         except ClientError as exc:
             self.log_client_error(exc)
             raise DDBInternalError(f"Error running query: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(f"Error running query: {exc!s}") from exc
 
         items = [self.parse_item(item) for item in resp.get("Items", [])]
         last_evaluated_key = resp.get("LastEvaluatedKey")
@@ -483,5 +509,9 @@ class BasePL8(IssueMixin, CommentMixin, AttachmentMixin, SpaceMixin):
                 **(log_context or {}))
             raise DDBInternalError(
                 f"Error updating {noun}: {ref}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(
+                f"Error updating {noun}: {exc!s}") from exc
 
         return self.parse_item(resp["Attributes"])

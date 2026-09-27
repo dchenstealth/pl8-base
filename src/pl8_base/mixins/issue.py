@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from ..const import (
     GSI1_INDEX_NAME,
@@ -285,6 +285,10 @@ class IssueMixin:
                 self.log_client_error(exc)
                 raise DDBInternalError(
                     f"Error creating issue: {exc!s}") from exc
+            except BotoCoreError as exc:
+                self.log_aws_error(exc)
+                raise DDBInternalError(
+                    f"Error creating issue: {exc!s}") from exc
 
             return issue_info
 
@@ -559,6 +563,9 @@ class IssueMixin:
 
             self.log_client_error(exc)
             raise DDBInternalError(f"Error deleting issue: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(f"Error deleting issue: {exc!s}") from exc
 
     # ------------------------------------------------------------------
     # Issue blockers
@@ -582,6 +589,7 @@ class IssueMixin:
             DDBTerminalStatusError: if the blocked Issue is DONE
             DDBExistsError: if the IssueBlocker already exists
             DDBTransactionConflictError: if every attempt conflicts
+            DDBInternalError: internal database error
         """
         validate_space_id(blocking_issue_space_id)
         validate_space_id(blocked_issue_space_id)
@@ -662,6 +670,10 @@ class IssueMixin:
             self.log_client_error(exc)
             raise DDBInternalError(
                 f"Error adding issue blocker: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(
+                f"Error adding issue blocker: {exc!s}") from exc
 
         return issue_blocker
 
@@ -683,6 +695,7 @@ class IssueMixin:
             DDBArgsError: if either space_id is invalid
             DDBMissingError: if the IssueBlocker does not exist
             DDBTransactionConflictError: if every attempt conflicts
+            DDBInternalError: internal database error
         """
         validate_space_id(blocking_issue_space_id)
         validate_space_id(blocked_issue_space_id)
@@ -723,6 +736,10 @@ class IssueMixin:
                 self.log_client_error(exc)
                 raise DDBInternalError(
                     f"Error deleting issue blocker: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(
+                f"Error deleting issue blocker: {exc!s}") from exc
 
         # The blocker is either already satisfied, in which case the counter
         # was decremented when the blocking Issue went DONE, or it is gone.
@@ -744,6 +761,10 @@ class IssueMixin:
                 raise DDBMissingError("IssueBlocker not found") from exc
 
             self.log_client_error(exc)
+            raise DDBInternalError(
+                f"Error deleting issue blocker: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
             raise DDBInternalError(
                 f"Error deleting issue blocker: {exc!s}") from exc
 
@@ -776,6 +797,8 @@ class IssueMixin:
 
         Raises:
             DDBArgsError: if space_id is invalid
+            DDBTransactionConflictError: if every attempt conflicts
+            DDBInternalError: internal database error
         """
         validate_space_id(space_id)
 
@@ -836,6 +859,8 @@ class IssueMixin:
 
         Raises:
             DDBArgsError: if space_id is invalid
+            DDBTransactionConflictError: if every attempt conflicts
+            DDBInternalError: internal database error
         """
         validate_space_id(space_id)
 
@@ -976,6 +1001,9 @@ class IssueMixin:
 
             self.log_client_error(exc)
             raise DDBInternalError(f"Error unblocking issue: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(f"Error unblocking issue: {exc!s}") from exc
 
     @retry_on_transaction_conflict()
     def apply_idempotent_transaction(self, items, message):
@@ -1026,6 +1054,9 @@ class IssueMixin:
                     return False, index
 
             self.log_client_error(exc)
+            raise DDBInternalError(f"{message}: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
             raise DDBInternalError(f"{message}: {exc!s}") from exc
 
         return True, None

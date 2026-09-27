@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import msgspec
+from botocore.exceptions import BotoCoreError, ClientError
 
 from .const import (
     MAX_ATTACHMENT_NAME_LEN,
@@ -479,10 +480,16 @@ def send_event(*, events_client, event, source, event_bus_name):
         dict: put_events response
 
     Raises:
-        EventSendError: if EventBridge reports a failed entry
+        EventSendError: if EventBridge reports a failed entry, or the call
+            itself fails
     """
     entry = event.to_entry(source=source, event_bus_name=event_bus_name)
-    response = events_client.put_events(Entries=[entry])
+
+    try:
+        response = events_client.put_events(Entries=[entry])
+    except (ClientError, BotoCoreError) as exc:
+        raise EventSendError(
+            f"Failed to send event {type(event).__name__}: {exc!s}") from exc
 
     if response.get("FailedEntryCount"):
         failed = response["Entries"][0]

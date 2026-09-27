@@ -92,23 +92,6 @@ class AttachmentMixin:
                 "Attachment operations need an s3_client and a bucket_name; "
                 "this BasePL8 was constructed without them")
 
-    def log_signing_error(self, exc):
-        """Log a failure to sign, from whichever botocore tree it came.
-
-        Signing makes no API call, so its failures are mostly
-        NoCredentialsError and NoRegionError. Those are BotoCoreErrors, not
-        ClientErrors, and have no exc.response for log_client_error to read.
-
-        Args:
-            exc (ClientError or BotoCoreError): the failure to log
-        """
-        if isinstance(exc, ClientError):
-            self.log_client_error(exc)
-            return
-
-        self.logger.exception(f"BotoCoreError ({type(exc).__name__})",
-                              error=str(exc))
-
     def presigned_attachment_post(self, attachment):
         """A presigned POST a caller can upload this attachment's bytes with.
 
@@ -142,8 +125,9 @@ class AttachmentMixin:
                 ExpiresIn=PRESIGN_EXPIRY_SECONDS,
             )
         except (ClientError, BotoCoreError) as exc:
-            # See log_signing_error for why both trees.
-            self.log_signing_error(exc)
+            # Signing makes no API call, so its failures are mostly
+            # NoCredentialsError and NoRegionError, which are BotoCoreErrors.
+            self.log_aws_error(exc)
             raise StorageInternalError(
                 f"Error signing attachment upload: {exc!s}") from exc
 
@@ -180,8 +164,8 @@ class AttachmentMixin:
                 ExpiresIn=PRESIGN_EXPIRY_SECONDS,
             )
         except (ClientError, BotoCoreError) as exc:
-            # See log_signing_error for why both trees.
-            self.log_signing_error(exc)
+            # Both trees, as in presigned_attachment_post.
+            self.log_aws_error(exc)
             raise StorageInternalError(
                 f"Error signing attachment download: {exc!s}") from exc
 
@@ -211,6 +195,10 @@ class AttachmentMixin:
                     f"{attachment.s3_key}") from exc
 
             self.log_client_error(exc)
+            raise StorageInternalError(
+                f"Error reading attachment object: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
             raise StorageInternalError(
                 f"Error reading attachment object: {exc!s}") from exc
 
@@ -338,6 +326,10 @@ class AttachmentMixin:
                     f"{attachment.attachment_id}") from exc
 
             self.log_client_error(exc)
+            raise DDBInternalError(
+                f"Error initiating issue attachment upload: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
             raise DDBInternalError(
                 f"Error initiating issue attachment upload: {exc!s}") from exc
 
@@ -481,6 +473,10 @@ class AttachmentMixin:
                     f"{space_id}#{issue_id}#{attachment.comment_id}") from exc
 
             self.log_client_error(exc)
+            raise DDBInternalError(
+                f"Error confirming issue attachment: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
             raise DDBInternalError(
                 f"Error confirming issue attachment: {exc!s}") from exc
 
@@ -866,5 +862,9 @@ class AttachmentMixin:
             # Raised rather than swallowed, so the event is retried or lands
             # in the DLQ instead of leaving the bytes behind.
             self.log_client_error(exc)
+            raise StorageInternalError(
+                f"Error deleting attachment object: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
             raise StorageInternalError(
                 f"Error deleting attachment object: {exc!s}") from exc

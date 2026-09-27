@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from ..errors import (
     DDBExistsError,
@@ -133,6 +133,10 @@ class CommentMixin:
                     f"IssueComment exists: {comment.comment_id}") from exc
 
             self.log_client_error(exc)
+            raise DDBInternalError(
+                f"Error creating issue comment: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
             raise DDBInternalError(
                 f"Error creating issue comment: {exc!s}") from exc
 
@@ -334,5 +338,9 @@ class CommentMixin:
                     f"Issue not found: {space_id}#{issue_id}") from exc
 
             self.log_client_error(exc)
+            raise DDBInternalError(
+                f"Error deleting issue comment: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
             raise DDBInternalError(
                 f"Error deleting issue comment: {exc!s}") from exc
