@@ -15,8 +15,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import msgspec
+from botocore.exceptions import BotoCoreError, ClientError
 
 from .const import (
+    MAX_ATTACHMENT_NAME_LEN,
+    MAX_ATTACHMENT_SIZE_BYTES,
+    MAX_CONTENT_TYPE_LEN,
     MAX_CREATOR_LEN,
     MAX_ISSUE_ID_LEN,
     MAX_SPACE_ID_LEN,
@@ -38,6 +42,17 @@ DEFAULT_ID_ALPHABET = string.ascii_letters + string.digits
 # Characters a caller-supplied space_id may use. Excludes "#", the separator
 # every key format string is built on.
 SPACE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+
+# Characters an attachment name MUST NOT contain; see validate_attachment_name.
+ATTACHMENT_NAME_FORBIDDEN = re.compile(r'[\x00-\x1f\x7f"\\]')
+
+# A media type, as "type/subtype" in RFC 9110 token characters. Parameters are
+# not accepted: PL8 records what kind of file an attachment is, not how it is
+# encoded, and nothing has needed more. Nothing downstream depends on their
+# absence, so the pattern can widen if something does. See
+# validate_content_type.
+CONTENT_TYPE_PATTERN = re.compile(
+    r"[A-Za-z0-9!#$%&'*+.^_`|~-]+/[A-Za-z0-9!#$%&'*+.^_`|~-]+")
 
 
 def isotime(dt=None, timespec="milliseconds"):
@@ -223,6 +238,123 @@ def validate_issue_status(status):
         raise DDBArgsError(f"Invalid issue status: {status!r}")
 
 
+def validate_comment_id(comment_id):
+    """
+    Validate a comment id.
+
+    A comment id composes keys, so a "#" or a newline in one would move the
+    key rather than fail to match. Valid means a UUIDv7, which
+    isotime_from_uuid7 already checks.
+
+    Args:
+        comment_id (str): id to validate
+
+    Raises:
+        DDBArgsError: if comment_id is not a UUIDv7
+    """
+    isotime_from_uuid7(comment_id)
+
+
+def validate_attachment_id(attachment_id):
+    """
+    Validate an attachment id.
+
+    Used by handle_issue_attachment_deleted, which builds an S3 key from an
+    event's ids with no row lookup in between, so a "/" or ".." could name
+    another object. Elsewhere a bad id simply matches no row.
+
+    Args:
+        attachment_id (str): id to validate
+
+    Raises:
+        DDBArgsError: if attachment_id is not a UUIDv7
+    """
+    isotime_from_uuid7(attachment_id)
+
+
+def validate_attachment_name(name):
+    """
+    Validate a caller-supplied attachment name.
+
+    The name is interpolated into a quoted Content-Disposition header on
+    download, so control characters, quotes and backslashes are refused:
+    each could break out of it. Anything else is allowed, since a name never
+    composes a key.
+
+    Args:
+        name (str): name to validate
+
+    Raises:
+        DDBArgsError: if the name is not a string, is empty, is too long, or
+            contains a control character, a quote or a backslash
+    """
+    if not isinstance(name, str):
+        raise DDBArgsError("Attachment name must be a string")
+
+    if not name:
+        raise DDBArgsError("Attachment name is empty")
+
+    if len(name) > MAX_ATTACHMENT_NAME_LEN:
+        raise DDBArgsError("Attachment name too long")
+
+    if ATTACHMENT_NAME_FORBIDDEN.search(name):
+        raise DDBArgsError("Attachment name has invalid characters")
+
+
+def validate_content_type(content_type):
+    """
+    Validate a caller-supplied attachment content type.
+
+    Stored on the S3 object and served as every download's Content-Type, so
+    it must be a well-formed media type. Checked as a shape rather than
+    against a list, so new media types are not refused.
+
+    Args:
+        content_type (str): content type to validate
+
+    Raises:
+        DDBArgsError: if the content type is not a string, is empty, is too
+            long, or is not "type/subtype" in token characters
+    """
+    if not isinstance(content_type, str):
+        raise DDBArgsError("Content type must be a string")
+
+    if not content_type:
+        raise DDBArgsError("Content type is empty")
+
+    if len(content_type) > MAX_CONTENT_TYPE_LEN:
+        raise DDBArgsError("Content type too long")
+
+    # fullmatch rather than a "$" anchored search, for the same reason
+    # validate_space_id uses one: "$" also matches before a trailing newline.
+    if not CONTENT_TYPE_PATTERN.fullmatch(content_type):
+        raise DDBArgsError("Invalid content type")
+
+
+def validate_attachment_size(size):
+    """
+    Validate a caller-supplied attachment size in bytes.
+
+    Zero is refused: an empty attachment is almost always a caller bug.
+
+    Args:
+        size (int): size in bytes
+
+    Raises:
+        DDBArgsError: if size is not an int, or is outside
+            1..MAX_ATTACHMENT_SIZE_BYTES
+    """
+    # bool is an int subclass, and True would otherwise be a size of 1.
+    if isinstance(size, bool) or not isinstance(size, int):
+        raise DDBArgsError("Attachment size must be an integer")
+
+    if size < 1:
+        raise DDBArgsError("Attachment size must be at least 1 byte")
+
+    if size > MAX_ATTACHMENT_SIZE_BYTES:
+        raise DDBArgsError("Attachment size too large")
+
+
 def encode_pagination_cursor(exclusive_start_key):
     """
     Encode a pagination cursor from a DynamoDB ExclusiveStartKey.
@@ -348,10 +480,16 @@ def send_event(*, events_client, event, source, event_bus_name):
         dict: put_events response
 
     Raises:
-        EventSendError: if EventBridge reports a failed entry
+        EventSendError: if EventBridge reports a failed entry, or the call
+            itself fails
     """
     entry = event.to_entry(source=source, event_bus_name=event_bus_name)
-    response = events_client.put_events(Entries=[entry])
+
+    try:
+        response = events_client.put_events(Entries=[entry])
+    except (ClientError, BotoCoreError) as exc:
+        raise EventSendError(
+            f"Failed to send event {type(event).__name__}: {exc!s}") from exc
 
     if response.get("FailedEntryCount"):
         failed = response["Entries"][0]

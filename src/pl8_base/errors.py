@@ -79,6 +79,36 @@ class DDBSpaceNotEmptyError(DDBError):
     """
 
 
+class DDBAttachmentStatusError(DDBError):
+    """Raised when an IssueAttachment is not in the status the operation needs.
+
+    From confirm or re-sign on an attachment that is already UPLOADED. A caller
+    confirming only to make sure its upload landed may treat this as success.
+    Retrying will fail the same way.
+    """
+
+
+class StorageError(Exception):
+    """Base class for object storage (S3) issues.
+
+    Not a DDBError, so a caller can tell a failed object from a failed row.
+    """
+
+
+class StorageInternalError(StorageError):
+    """Raised for general object storage errors, and for a manager asked to do
+    attachment work without an s3_client or bucket_name.
+    """
+
+
+class StorageObjectMissingError(StorageError):
+    """Raised when an attachment's S3 object does not exist.
+
+    Usually a confirm that arrived before the upload finished. The row is still
+    PENDING, so the caller may upload and confirm again.
+    """
+
+
 class EventError(Exception):
     """Base class for event issues"""
 

@@ -103,3 +103,29 @@ class IssueReady(BaseEvent):
 
     space_id: str
     issue_id: str
+
+
+class IssueCommentDeleted(BaseEvent):
+    """Core lifecycle event.
+
+    Sent when an IssueComment is deleted. Triggers deletion of the
+    IssueAttachments linked to it.
+    """
+    type_version: str = "0.0.1"
+
+    space_id: str
+    issue_id: str
+    comment_id: str
+
+
+class IssueAttachmentDeleted(BaseEvent):
+    """Core lifecycle event.
+
+    Sent when an IssueAttachment row is deleted by any means, including TTL
+    expiry. Triggers deletion of its S3 object.
+    """
+    type_version: str = "0.0.1"
+
+    space_id: str
+    issue_id: str
+    attachment_id: str

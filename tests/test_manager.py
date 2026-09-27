@@ -354,3 +354,104 @@ class TestBuildUpdate:
     def test_keyword_only(self, mgr):
         with pytest.raises(TypeError):
             mgr._build_update(INFO_PK, INFO_SK, title="new title")
+
+
+class TestBuildUpdateRemoveAttrs:
+    """REMOVE, which confirm_issue_attachment_uploaded needs to drop an
+    attachment's TTL attribute in the same write that marks it UPLOADED.
+
+    A NULL would not do: DynamoDB's TTL, a sparse index and
+    attribute_not_exists all read a present attribute, whatever its value."""
+
+    def test_removes_the_attr(self, mgr, dynamodb_client, stored_info,
+                              get_raw):
+        dynamodb_client.update_item(**mgr._build_update(
+            PK=INFO_PK, SK=INFO_SK, remove_attrs=["status_updated_at"]))
+
+        assert "status_updated_at" not in get_raw(INFO_PK, INFO_SK)
+
+    def test_the_attr_is_gone_not_null(self, mgr, dynamodb_client,
+                                       stored_info, get_raw):
+        dynamodb_client.update_item(**mgr._build_update(
+            PK=INFO_PK, SK=INFO_SK, remove_attrs=["status_updated_at"]))
+
+        row = get_raw(INFO_PK, INFO_SK)
+        assert row.get("status_updated_at") is None
+
+    def test_sets_and_removes_in_one_expression(self, mgr, dynamodb_client,
+                                                stored_info, get_raw):
+        # One UpdateExpression, so the set and the removal are the same atomic
+        # write rather than two that could be interleaved.
+        update = mgr._build_update(PK=INFO_PK, SK=INFO_SK, title="new title",
+                                   remove_attrs=["status_updated_at"])
+
+        assert update["UpdateExpression"].startswith("SET ")
+        assert " REMOVE #status_updated_at" in update["UpdateExpression"]
+
+        dynamodb_client.update_item(**update)
+        row = get_raw(INFO_PK, INFO_SK)
+        assert row["title"] == {"S": "new title"}
+        assert "status_updated_at" not in row
+
+    def test_still_bumps_version_and_updated_at(self, mgr, dynamodb_client,
+                                                stored_info, get_raw):
+        dynamodb_client.update_item(**mgr._build_update(
+            PK=INFO_PK, SK=INFO_SK, remove_attrs=["status_updated_at"]))
+
+        row = get_raw(INFO_PK, INFO_SK)
+        assert row["version"] == {"N": "2"}
+        assert row["updated_at"] != {"S": stored_info.updated_at}
+
+    def test_removed_names_go_through_expression_attribute_names(self, mgr):
+        # Every attr does, since "status" and "version" are reserved words and
+        # the next field added would be the trap.
+        update = mgr._build_update(PK=INFO_PK, SK=INFO_SK,
+                                   remove_attrs=["status_updated_at"])
+
+        assert update["ExpressionAttributeNames"]["#status_updated_at"] == \
+            "status_updated_at"
+
+    def test_no_remove_clause_without_remove_attrs(self, mgr):
+        for remove_attrs in (None, [], ()):
+            update = mgr._build_update(PK=INFO_PK, SK=INFO_SK, title="t",
+                                       remove_attrs=remove_attrs)
+
+            assert "REMOVE" not in update["UpdateExpression"]
+
+    def test_removing_an_absent_attr_is_a_no_op(self, mgr, dynamodb_client,
+                                                stored_info, get_raw):
+        dynamodb_client.update_item(**mgr._build_update(
+            PK=INFO_PK, SK=INFO_SK, remove_attrs=["never_stored"]))
+
+        assert get_raw(INFO_PK, INFO_SK)["version"] == {"N": "2"}
+
+    def test_removes_several_attrs(self, mgr, dynamodb_client, stored_info,
+                                   get_raw):
+        dynamodb_client.update_item(**mgr._build_update(
+            PK=INFO_PK, SK=INFO_SK,
+            remove_attrs=["status_updated_at", "num_comments"]))
+
+        row = get_raw(INFO_PK, INFO_SK)
+        assert "status_updated_at" not in row
+        assert "num_comments" not in row
+
+    def test_the_conditions_still_apply(self, mgr, dynamodb_client,
+                                        stored_info, get_raw):
+        with pytest.raises(ClientError):
+            dynamodb_client.update_item(**mgr._build_update(
+                PK=INFO_PK, SK=INFO_SK, version=99,
+                remove_attrs=["status_updated_at"]))
+
+        assert "status_updated_at" in get_raw(INFO_PK, INFO_SK)
+
+    def test_usable_inside_a_transaction(self, mgr, dynamodb_client,
+                                        stored_info, get_raw):
+        dynamodb_client.transact_write_items(TransactItems=[{
+            "Update": mgr._build_update(PK=INFO_PK, SK=INFO_SK,
+                                        title="new title",
+                                        remove_attrs=["status_updated_at"]),
+        }])
+
+        row = get_raw(INFO_PK, INFO_SK)
+        assert row["title"] == {"S": "new title"}
+        assert "status_updated_at" not in row

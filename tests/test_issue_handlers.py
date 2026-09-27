@@ -974,24 +974,62 @@ class TestSweepDoesNotTrustTheQueriedFlag:
 
 
 class TestApplyIdempotentTransactionReportsOutcome:
-    def test_returns_true_when_applied(self, ctv, mgr, make_issue):
+    """The return is (applied, failed_index), not a bool: which item was
+    cancelled means something different for each item, and a caller that cannot
+    tell them apart has to guess. AttachmentMixin's delete guessed wrong and
+    lost counter decrements for it."""
+
+    def test_returns_applied_with_no_failed_index(self, ctv, mgr, make_issue):
         issue = make_issue("issue")
-        applied = mgr.apply_idempotent_transaction([
+        applied, failed_index = mgr.apply_idempotent_transaction([
             {"Update": mgr._build_update(
                 PK=issue.PK, SK=issue.SK, title="moved")},
         ], "Error in test")
 
         assert applied is True
+        assert failed_index is None
         assert reload(mgr, ctv, issue).title == "moved"
 
     def test_returns_false_when_a_condition_failed(self, ctv, mgr):
-        applied = mgr.apply_idempotent_transaction([
+        applied, failed_index = mgr.apply_idempotent_transaction([
             {"Update": mgr._build_update(
                 PK=mgr.issue_pk(ctv.space_id, "nope"),
                 SK="100#INFO", title="moved")},
         ], "Error in test")
 
         assert applied is False
+        assert failed_index == 0
+
+    def test_names_which_item_failed(self, ctv, mgr, make_issue):
+        """The whole point of the index: the first item is fine and the second
+        is not, and only the position says so."""
+        issue = make_issue("issue")
+
+        applied, failed_index = mgr.apply_idempotent_transaction([
+            {"Update": mgr._build_update(
+                PK=issue.PK, SK=issue.SK, title="moved")},
+            {"Update": mgr._build_update(
+                PK=mgr.issue_pk(ctv.space_id, "nope"),
+                SK="100#INFO", title="moved")},
+        ], "Error in test")
+
+        assert applied is False
+        assert failed_index == 1
+        # Cancelled as a whole, so the first item did not land either.
+        assert reload(mgr, ctv, issue).title != "moved"
+
+    def test_reports_the_first_failure_when_several_fail(self, ctv, mgr):
+        applied, failed_index = mgr.apply_idempotent_transaction([
+            {"Update": mgr._build_update(
+                PK=mgr.issue_pk(ctv.space_id, "nope"),
+                SK="100#INFO", title="moved")},
+            {"Update": mgr._build_update(
+                PK=mgr.issue_pk(ctv.space_id, "nope2"),
+                SK="100#INFO", title="moved")},
+        ], "Error in test")
+
+        assert applied is False
+        assert failed_index == 0
 
 
 class TestHandleIssueDeletedSweepsComments:

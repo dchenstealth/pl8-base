@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from ..errors import (
     DDBExistsError,
@@ -12,11 +12,20 @@ from ..errors import (
 from ..types import IssueComment
 from ..util import (
     retry_on_transaction_conflict,
+    validate_comment_id,
     validate_creator,
     validate_space_id,
 )
 
 COMMENT_SK_PREFIX = "500#COMMENT#"
+
+# Upper bound of the comment group in an Issue's partition: "$" sorts just
+# after "#", so this is above every comment key and below the next group.
+COMMENT_SK_GROUP_END = COMMENT_SK_PREFIX[:-1] + "$"
+
+# Appended to a sort key to make an inclusive bound exclusive: nothing sorts
+# between a key and that key plus a NUL.
+SK_EXCLUSIVE_SUFFIX = "\u0000"
 
 
 class CommentMixin:
@@ -25,6 +34,9 @@ class CommentMixin:
     A comment shares its Issue's partition, so a thread is one query and no GSI
     carries it. comment_id is a UUIDv7 and created_at is read back out of it,
     which is what makes sort key order creation order; see types/issue.py.
+
+    A comment's linked IssueAttachments and its num_attachments are
+    AttachmentMixin's.
 
     create_issue_comment and delete_issue_comment keep the Issue's num_comments
     in step, in the same transaction as the comment write. That is what refuses
@@ -123,6 +135,10 @@ class CommentMixin:
             self.log_client_error(exc)
             raise DDBInternalError(
                 f"Error creating issue comment: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(
+                f"Error creating issue comment: {exc!s}") from exc
 
         return comment
 
@@ -140,16 +156,27 @@ class CommentMixin:
         return self.get_primary_item(PK=self.issue_pk(space_id, issue_id),
                                      SK=self.comment_sk(comment_id))
 
-    def get_issue_comments(self, *, space_id, issue_id, limit=50, cursor=None):
-        """One page of an Issue's IssueComments, oldest first.
+    def get_issue_comments(self, *, space_id, issue_id, limit=50, cursor=None,
+                           ascending=True):
+        """One page of an Issue's IssueComments, oldest first by default.
 
-        Sorted by sort key ascending, which is by comment_id, which is by
-        creation timestamp: see types/issue.py. Nothing sorts on an updated
-        timestamp, so editing a comment does not move it in the thread.
+        Sorted by sort key, which is by comment_id, which is by creation
+        timestamp: see types/issue.py. Nothing sorts on an updated timestamp, so
+        editing a comment does not move it in the thread.
 
-        The SK prefix is what keeps the Issue's own info and blocker rows out
-        of the result. That is a key condition rather than a filter, so Limit
-        counts only comment rows.
+        ascending=False reads newest first, so a caller can page from the end
+        of a long thread.
+
+        The SK prefix is what keeps the Issue's own info, attachment and blocker
+        rows out of the result. That is a key condition rather than a filter, so
+        Limit counts only comment rows.
+
+        Args:
+            space_id (str): id of the issue's space
+            issue_id (str): id of the issue
+            limit (int): maximum rows per page
+            cursor (str or None): pagination cursor from a previous page
+            ascending (bool): oldest first when True, newest first when False
 
         Returns:
             tuple: (list[IssueComment], str or None)
@@ -166,6 +193,59 @@ class CommentMixin:
             "ExpressionAttributeValues": {
                 ":pk": self.ts.serialize(self.issue_pk(space_id, issue_id)),
                 ":sk": self.ts.serialize(COMMENT_SK_PREFIX),
+            },
+            "ScanIndexForward": ascending,
+        }, cursor=cursor, limit=limit)
+
+    def get_issue_comments_after(self, *, space_id, issue_id,
+                                 last_comment_id=None, limit=50, cursor=None):
+        """One page of an Issue's IssueComments newer than a given comment.
+
+        For a caller syncing a thread it has already partly read: it holds the
+        id of the last comment it saw and wants what has been written since.
+
+        Always ascending: the caller is extending a thread it already holds.
+
+        A BETWEEN rather than a `>`, because DynamoDB allows only one sort key
+        condition and an unbounded `>` would run past the comments into the
+        other rows in the partition. The start excludes the named comment
+        itself; see SK_EXCLUSIVE_SUFFIX and COMMENT_SK_GROUP_END.
+
+        Args:
+            space_id (str): id of the issue's space
+            issue_id (str): id of the issue
+            last_comment_id (str or None): id of the newest comment the caller
+                already has, excluded from the result; None for the whole
+                thread
+            limit (int): maximum rows per page
+            cursor (str or None): pagination cursor from a previous page
+
+        Returns:
+            tuple: (list[IssueComment], str or None)
+
+        Raises:
+            DDBArgsError: if space_id or cursor is invalid, or last_comment_id
+                is given and is not a UUIDv7
+            DDBInternalError: internal database error
+        """
+        validate_space_id(space_id)
+
+        if last_comment_id is None:
+            start = COMMENT_SK_PREFIX
+        else:
+            # It composes a key bound, so a malformed id would move the range.
+            validate_comment_id(last_comment_id)
+            start = (f"{COMMENT_SK_PREFIX}{last_comment_id}"
+                     f"{SK_EXCLUSIVE_SUFFIX}")
+
+        return self.run_query({
+            "KeyConditionExpression":
+                "#pk = :pk AND #sk BETWEEN :start AND :end",
+            "ExpressionAttributeNames": {"#pk": "PK", "#sk": "SK"},
+            "ExpressionAttributeValues": {
+                ":pk": self.ts.serialize(self.issue_pk(space_id, issue_id)),
+                ":start": self.ts.serialize(start),
+                ":end": self.ts.serialize(COMMENT_SK_GROUP_END),
             },
             "ScanIndexForward": True,
         }, cursor=cursor, limit=limit)
@@ -258,5 +338,9 @@ class CommentMixin:
                     f"Issue not found: {space_id}#{issue_id}") from exc
 
             self.log_client_error(exc)
+            raise DDBInternalError(
+                f"Error deleting issue comment: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
             raise DDBInternalError(
                 f"Error deleting issue comment: {exc!s}") from exc

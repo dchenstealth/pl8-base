@@ -2,10 +2,11 @@
 #
 # SPDX-License-Identifier: MIT
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from ..const import GSI1_INDEX_NAME
 from ..errors import (
+    DDBArgsError,
     DDBExistsError,
     DDBInternalError,
     DDBMissingError,
@@ -129,6 +130,9 @@ class SpaceMixin:
 
             self.log_client_error(exc)
             raise DDBInternalError(f"Error creating space: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(f"Error creating space: {exc!s}") from exc
 
         return space_info
 
@@ -170,8 +174,9 @@ class SpaceMixin:
         }, cursor=cursor, limit=limit)
 
     @retry_on_transaction_conflict()
-    def update_space(self, *, space_id, name, description, version=None):
-        """Update a Space's name and description.
+    def update_space(self, *, space_id, name=None, description=None,
+                     version=None):
+        """Update a Space's name, description, or both.
 
         No classify hook: a Space carries no domain conditions, so a failed
         condition can only mean the row is gone or the version is stale.
@@ -181,14 +186,16 @@ class SpaceMixin:
 
         Args:
             space_id (str): id of the space
-            name (str): new space display name
-            description (str): new space description
+            name (str or None): new space display name, or None to leave it
+            description (str or None): new space description, or None to
+                leave it
             version (int or None): if set, fence the write on this version
 
         Returns: SpaceInfo
 
         Raises:
-            DDBArgsError: if space_id is invalid, or description is not a string
+            DDBArgsError: if space_id is invalid, neither name nor description
+                is given, or description is not a string
             DDBMissingError: if the Space does not exist
             DDBVersionConflictError: if version is set and did not match
             DDBTransactionConflictError: if every attempt conflicts
@@ -196,12 +203,20 @@ class SpaceMixin:
         """
         validate_space_id(space_id)
 
+        attrs = {}
+        if name is not None:
+            attrs["name"] = name
+        if description is not None:
+            attrs["description"] = SpaceInfo.compress_value("description",
+                                                            description)
+        if not attrs:
+            raise DDBArgsError("Space update needs a name or a description")
+
         update = self._build_update(
             PK=self.space_pk(space_id),
             SK=SpaceInfo.KEY_ATTRS["SK"],
             version=version,
-            name=name,
-            description=SpaceInfo.compress_value("description", description),
+            **attrs,
         )
         return self.apply_update(update, entity="Space", ref=space_id,
                                  version=version,
@@ -251,4 +266,7 @@ class SpaceMixin:
                     f"Space {space_id} has {old.issue_count} Issues") from exc
 
             self.log_client_error(exc)
+            raise DDBInternalError(f"Error deleting space: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
             raise DDBInternalError(f"Error deleting space: {exc!s}") from exc

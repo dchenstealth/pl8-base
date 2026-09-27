@@ -279,6 +279,29 @@ class TestUpdateSpace:
         assert loaded.name == "Ops"
         assert loaded.description == "new desc"
 
+    def test_name_alone_leaves_the_description(self, ctv, mgr, new_space):
+        mgr.update_space(space_id=ctv.space_id, name="Ops")
+
+        loaded = mgr.get_space(space_id=ctv.space_id)
+        assert loaded.name == "Ops"
+        assert loaded.description == new_space.description
+
+    def test_description_alone_leaves_the_name(self, ctv, mgr, new_space,
+                                               get_raw):
+        mgr.update_space(space_id=ctv.space_id, description="new desc")
+
+        loaded = mgr.get_space(space_id=ctv.space_id)
+        assert loaded.name == new_space.name
+        assert loaded.description == "new desc"
+        stored = get_raw(new_space.PK, new_space.SK)["description"]
+        assert gzip.decompress(stored["B"]).decode() == "new desc"
+
+    def test_neither_is_refused_without_writing(self, ctv, mgr, new_space):
+        with pytest.raises(DDBArgsError, match="name or a description"):
+            mgr.update_space(space_id=ctv.space_id)
+
+        assert mgr.get_space(space_id=ctv.space_id).version == 1
+
     def test_name_survives_being_a_reserved_word(self, ctv, mgr, new_space,
                                                  get_raw):
         # NAME is a DynamoDB reserved word. _build_update aliases every attr

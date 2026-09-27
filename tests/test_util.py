@@ -11,6 +11,9 @@ from decimal import Decimal
 import pytest
 
 from pl8_base.const import (
+    MAX_ATTACHMENT_NAME_LEN,
+    MAX_ATTACHMENT_SIZE_BYTES,
+    MAX_CONTENT_TYPE_LEN,
     MAX_CREATOR_LEN,
     MAX_ISSUE_ID_LEN,
     MAX_SPACE_ID_LEN,
@@ -31,6 +34,11 @@ from pl8_base.util import (
     isotime,
     isotime_from_uuid7,
     retry_on_transaction_conflict,
+    validate_attachment_id,
+    validate_attachment_name,
+    validate_attachment_size,
+    validate_comment_id,
+    validate_content_type,
     validate_creator,
     validate_issue_status,
     validate_space_id,
@@ -570,3 +578,181 @@ class TestValidateCreator:
     def test_rejects_too_long(self):
         with pytest.raises(DDBArgsError, match="too long"):
             validate_creator("x" * (MAX_CREATOR_LEN + 1))
+
+
+class TestValidateCommentId:
+    """A comment id composes a sort key twice over, so it is checked by the one
+    rule PL8 has for comment ids: it is a UUIDv7."""
+
+    def test_accepts_a_uuidv7(self):
+        validate_comment_id(str(uuid.uuid7()))
+
+    def test_rejects_a_uuid4(self):
+        with pytest.raises(DDBArgsError, match="Not a UUIDv7"):
+            validate_comment_id(str(uuid.uuid4()))
+
+    @pytest.mark.parametrize("comment_id", [
+        "",
+        "nosuch",
+        "500#COMMENT#x",
+        "0199f3a1-0000-7000-8000-00000000000",
+        None,
+        123,
+    ])
+    def test_rejects_anything_that_is_not_one(self, comment_id):
+        with pytest.raises(DDBArgsError):
+            validate_comment_id(comment_id)
+
+    def test_a_separator_cannot_reach_a_key(self):
+        # The point of the check: an id carrying a "#" would move the sort key
+        # it composes rather than fail to match it.
+        with pytest.raises(DDBArgsError):
+            validate_comment_id("abc#def")
+
+
+class TestValidateAttachmentId:
+    """An attachment id composes an S3 key that
+    handle_issue_attachment_deleted recomputes from an event's ids, so it is
+    checked by the one rule PL8 has for attachment ids: it is a UUIDv7."""
+
+    def test_accepts_a_uuidv7(self):
+        validate_attachment_id(str(uuid.uuid7()))
+
+    def test_rejects_a_uuid4(self):
+        with pytest.raises(DDBArgsError, match="Not a UUIDv7"):
+            validate_attachment_id(str(uuid.uuid4()))
+
+    @pytest.mark.parametrize("attachment_id", [
+        "",
+        "nosuch",
+        "600#ATTACHMENT#x",
+        "0199f3a1-0000-7000-8000-00000000000",
+        None,
+        123,
+    ])
+    def test_rejects_anything_that_is_not_one(self, attachment_id):
+        with pytest.raises(DDBArgsError):
+            validate_attachment_id(attachment_id)
+
+    @pytest.mark.parametrize("attachment_id", ["../../secret", "a/b"])
+    def test_a_traversal_cannot_reach_an_s3_key(self, attachment_id):
+        # The point of the check: the id is interpolated into
+        # IssueAttachment.S3_KEY_FORMAT straight off an event.
+        with pytest.raises(DDBArgsError):
+            validate_attachment_id(attachment_id)
+
+
+class TestValidateAttachmentName:
+    def test_accepts_a_plain_filename(self):
+        validate_attachment_name("report.pdf")
+
+    def test_accepts_spaces_and_punctuation(self):
+        # A name never composes a key, so a filename may look like a filename.
+        validate_attachment_name("Q3 report (final), v2.pdf")
+
+    def test_accepts_non_ascii(self):
+        validate_attachment_name("réunion.pdf")
+
+    def test_accepts_the_maximum_length(self):
+        validate_attachment_name("x" * MAX_ATTACHMENT_NAME_LEN)
+
+    def test_rejects_an_empty_name(self):
+        with pytest.raises(DDBArgsError, match="empty"):
+            validate_attachment_name("")
+
+    def test_rejects_a_non_string(self):
+        with pytest.raises(DDBArgsError, match="must be a string"):
+            validate_attachment_name(1)
+
+    def test_rejects_too_long(self):
+        with pytest.raises(DDBArgsError, match="too long"):
+            validate_attachment_name("x" * (MAX_ATTACHMENT_NAME_LEN + 1))
+
+    @pytest.mark.parametrize("name", [
+        # The name is interpolated into a signed
+        # `attachment; filename="<name>"` header on the download URL, so each
+        # of these is an injection into a header the caller does not otherwise
+        # control.
+        'quote".pdf',
+        "back\\slash.pdf",
+        "new\nline.pdf",
+        "carriage\rreturn.pdf",
+        "null\x00byte.pdf",
+        "tab\tstop.pdf",
+        "delete\x7f.pdf",
+    ])
+    def test_rejects_characters_that_break_out_of_the_header(self, name):
+        with pytest.raises(DDBArgsError, match="invalid characters"):
+            validate_attachment_name(name)
+
+
+class TestValidateContentType:
+    @pytest.mark.parametrize("content_type", [
+        "application/pdf",
+        "text/plain",
+        "image/svg+xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "x-custom/x.future-format",
+    ])
+    def test_accepts_a_media_type(self, content_type):
+        # Checked as a shape, not against a list: PL8 has no opinion on the
+        # format, so an allowlist would only reject next year's media types.
+        validate_content_type(content_type)
+
+    def test_accepts_the_maximum_length(self):
+        validate_content_type("a/" + "x" * (MAX_CONTENT_TYPE_LEN - 2))
+
+    def test_rejects_an_empty_type(self):
+        with pytest.raises(DDBArgsError, match="empty"):
+            validate_content_type("")
+
+    def test_rejects_a_non_string(self):
+        with pytest.raises(DDBArgsError, match="must be a string"):
+            validate_content_type(1)
+
+    def test_rejects_too_long(self):
+        with pytest.raises(DDBArgsError, match="too long"):
+            validate_content_type("a/" + "x" * MAX_CONTENT_TYPE_LEN)
+
+    @pytest.mark.parametrize("content_type", [
+        "application",
+        "application/",
+        "/pdf",
+        "application//pdf",
+        "application/pdf/extra",
+        "application pdf",
+        "application/pdf\n",
+        # Parameters are refused on purpose; see CONTENT_TYPE_PATTERN.
+        "text/plain; charset=utf-8",
+    ])
+    def test_rejects_anything_that_is_not_type_subtype(self, content_type):
+        with pytest.raises(DDBArgsError, match="Invalid content type"):
+            validate_content_type(content_type)
+
+
+class TestValidateAttachmentSize:
+    @pytest.mark.parametrize("size", [1, 1024, MAX_ATTACHMENT_SIZE_BYTES])
+    def test_accepts_a_size_in_range(self, size):
+        validate_attachment_size(size)
+
+    def test_rejects_zero(self):
+        with pytest.raises(DDBArgsError, match="at least 1 byte"):
+            validate_attachment_size(0)
+
+    def test_rejects_a_negative_size(self):
+        with pytest.raises(DDBArgsError, match="at least 1 byte"):
+            validate_attachment_size(-1)
+
+    def test_rejects_too_large(self):
+        with pytest.raises(DDBArgsError, match="too large"):
+            validate_attachment_size(MAX_ATTACHMENT_SIZE_BYTES + 1)
+
+    @pytest.mark.parametrize("size", ["11", 11.0, None, [11]])
+    def test_rejects_a_non_integer(self, size):
+        with pytest.raises(DDBArgsError, match="must be an integer"):
+            validate_attachment_size(size)
+
+    def test_rejects_a_bool(self):
+        # True is an int in Python, so it would otherwise be a legal one byte.
+        with pytest.raises(DDBArgsError, match="must be an integer"):
+            validate_attachment_size(True)

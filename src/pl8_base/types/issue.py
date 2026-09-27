@@ -6,9 +6,10 @@ from types import MappingProxyType
 from typing import ClassVar
 from uuid import uuid7
 
+from ..const import ATTACHMENT_SK_PREFIX
 from ..util import isotime, isotime_from_uuid7
 from .base import BaseObject
-from .enums import IssueStatus
+from .enums import AttachmentStatus, IssueStatus
 
 
 class IssueInfo(BaseObject):
@@ -50,6 +51,12 @@ class IssueInfo(BaseObject):
     # MUST be enforced atomically via transactions, and MUST NOT move version;
     # see mixins/issue.py issue_num_comments_update.
     num_comments: int = 0
+
+    # The number of UPLOADED IssueAttachments on this Issue, linked or not.
+    # PENDING ones are not counted, since their bytes may never arrive.
+    # MUST be enforced atomically via transactions, and MUST NOT move version;
+    # see mixins/issue.py issue_num_attachments_update.
+    num_attachments: int = 0
 
     def __post_init__(self):
         # status_updated_at feeds GSI1SK, so both it and created_at must be
@@ -104,6 +111,12 @@ class IssueComment(BaseObject):
     creator: str
     comment_id: str | None = None
 
+    # The number of UPLOADED IssueAttachments linked to this comment. Each is
+    # also counted on the Issue.
+    # MUST be enforced atomically via transactions, and MUST NOT move version;
+    # see mixins/issue.py comment_num_attachments_update.
+    num_attachments: int = 0
+
     def __post_init__(self):
         # comment_id feeds SK, so it must be resolved before
         # BaseObject.__post_init__ renders KEY_ATTRS from self.dict().
@@ -117,6 +130,84 @@ class IssueComment(BaseObject):
             self.created_at = isotime_from_uuid7(self.comment_id)
 
         super().__post_init__()
+
+
+class IssueAttachment(BaseObject):
+    """Item representing a file attached to an Issue, stored in S3.
+
+    Lives in the Issue's partition, like an IssueComment, and like one takes
+    its created_at from its UUIDv7 id. GSI1 holds only attachments linked to
+    a comment.
+    """
+    KEY_ATTRS: ClassVar[MappingProxyType] = MappingProxyType({
+        "PK": "ISSUE#{space_id}#{issue_id}",
+        "SK": ATTACHMENT_SK_PREFIX + "{attachment_id}",
+        # Only rendered while comment_id is set; see __post_init__.
+        "GSI1PK": "COMMENTATTACHMENT#{space_id}#{issue_id}#{comment_id}",
+        "GSI1SK": ATTACHMENT_SK_PREFIX + "{attachment_id}",
+    })
+    COMPRESSED_ATTRS: ClassVar[set[str]] = set()
+
+    # The S3 key an attachment's bytes live under. Includes space_id because an
+    # issue_id is only unique within a Space, and an S3 prefix is the only
+    # boundary IAM policies and lifecycle rules can scope to.
+    S3_KEY_FORMAT: ClassVar[str] = (
+        "space/{space_id}/issue/{issue_id}/attachments/{attachment_id}")
+
+    PK: str | None = None
+    SK: str | None = None
+    GSI1PK: str | None = None
+    GSI1SK: str | None = None
+    type_version: str = "0.0.1"
+
+    space_id: str
+    issue_id: str
+    name: str
+    creator: str
+    content_type: str
+    size: int
+    attachment_id: str | None = None
+
+    # The IssueComment this attachment is attributed to, or None. Fixed at
+    # creation, since it decides which comment's deletion takes it.
+    comment_id: str | None = None
+
+    status: AttachmentStatus = AttachmentStatus.PENDING
+
+    # Unix seconds at which TTL deletes this row, set only while PENDING; see
+    # const.ATTACHMENT_PENDING_TTL_SECONDS.
+    expires_at: int | None = None
+
+    def __post_init__(self):
+        # attachment_id feeds SK, so it must be resolved before
+        # BaseObject.__post_init__ renders KEY_ATTRS from self.dict().
+        if not self.attachment_id:
+            self.attachment_id = str(uuid7())
+
+        # Read out of the id so the two cannot disagree. Setting it here also
+        # makes the base class skip it.
+        if not self.created_at:
+            self.created_at = isotime_from_uuid7(self.attachment_id)
+
+        super().__post_init__()
+
+        # super() rendered GSI1 keys with a literal "None" for an unlinked
+        # attachment. Clear them so serialize() omits them and the row stays
+        # out of the index.
+        if self.comment_id is None:
+            self.GSI1PK = None
+            self.GSI1SK = None
+
+    @property
+    def s3_key(self):
+        """The S3 key this attachment's bytes live under."""
+        return self.S3_KEY_FORMAT.format(space_id=self.space_id,
+                                         issue_id=self.issue_id,
+                                         attachment_id=self.attachment_id)
+
+    @property
+    def is_uploaded(self):
+        return self.status == AttachmentStatus.UPLOADED
 
 
 class IssueBlocker(BaseObject):

@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from ..const import (
     GSI1_INDEX_NAME,
@@ -18,7 +18,13 @@ from ..errors import (
     DDBStillBlockedError,
     DDBTerminalStatusError,
 )
-from ..types import IssueBlocker, IssueComment, IssueInfo, IssueStatus
+from ..types import (
+    IssueAttachment,
+    IssueBlocker,
+    IssueComment,
+    IssueInfo,
+    IssueStatus,
+)
 from ..util import (
     gen_issue_id,
     isotime,
@@ -59,6 +65,9 @@ class IssueMixin:
     while it holds Issues, whereas an Issue is deleted whatever its
     num_comments and handle_issue_deleted sweeps the comments after it. See
     CommentMixin.
+
+    num_attachments counts only UPLOADED attachments, so it moves on confirm
+    rather than with the row's Put; see AttachmentMixin.
     """
 
     # ------------------------------------------------------------------
@@ -105,6 +114,49 @@ class IssueMixin:
             "ExpressionAttributeNames": {
                 "#PK": "PK",
                 "#num_comments": "num_comments",
+            },
+            "ExpressionAttributeValues": {
+                ":delta": self.serialize_value(delta),
+            },
+            "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
+        }
+
+    def issue_num_attachments_update(self, space_id, issue_id, delta):
+        """Update dict adding delta to an Issue's num_attachments.
+
+        For confirm and the deletes. Built by hand rather than with
+        _build_update, so attachment traffic does not bump the Issue's version;
+        see issue_num_comments_update.
+        """
+        return {
+            "TableName": self.table_name,
+            "Key": self.issue_info_key(space_id, issue_id),
+            "UpdateExpression": "ADD #num_attachments :delta",
+            "ConditionExpression": "attribute_exists(#PK)",
+            "ExpressionAttributeNames": {
+                "#PK": "PK",
+                "#num_attachments": "num_attachments",
+            },
+            "ExpressionAttributeValues": {
+                ":delta": self.serialize_value(delta),
+            },
+            "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
+        }
+
+    def comment_num_attachments_update(self, space_id, issue_id, comment_id,
+                                       delta):
+        """Update dict adding delta to an IssueComment's num_attachments.
+
+        Does not bump the comment's version, as issue_num_attachments_update.
+        """
+        return {
+            "TableName": self.table_name,
+            "Key": self.comment_key(space_id, issue_id, comment_id),
+            "UpdateExpression": "ADD #num_attachments :delta",
+            "ConditionExpression": "attribute_exists(#PK)",
+            "ExpressionAttributeNames": {
+                "#PK": "PK",
+                "#num_attachments": "num_attachments",
             },
             "ExpressionAttributeValues": {
                 ":delta": self.serialize_value(delta),
@@ -231,6 +283,10 @@ class IssueMixin:
                     continue
 
                 self.log_client_error(exc)
+                raise DDBInternalError(
+                    f"Error creating issue: {exc!s}") from exc
+            except BotoCoreError as exc:
+                self.log_aws_error(exc)
                 raise DDBInternalError(
                     f"Error creating issue: {exc!s}") from exc
 
@@ -373,22 +429,23 @@ class IssueMixin:
         }, cursor=cursor, limit=limit)
 
     @retry_on_transaction_conflict()
-    def update_issue(self, *, space_id, issue_id, title, description,
+    def update_issue(self, *, space_id, issue_id, title=None, description=None,
                      version=None):
-        """Update an Issue's title and description.
+        """Update an Issue's title, description, or both.
 
         Args:
             space_id (str): id of the issue's space
             issue_id (str): id of the issue
-            title (str): new issue title
-            description (str): new issue description
+            title (str or None): new issue title, or None to leave it
+            description (str or None): new issue description, or None to
+                leave it
             version (int or None): if set, fence the write on this version
 
         Returns: IssueInfo
 
         Raises:
-            DDBArgsError: if space_id is invalid, or description is not a
-                string
+            DDBArgsError: if space_id is invalid, neither title nor description
+                is given, or description is not a string
             DDBMissingError: if the Issue does not exist
             DDBVersionConflictError: if version is set and did not match
             DDBTransactionConflictError: if every attempt conflicts
@@ -396,12 +453,20 @@ class IssueMixin:
         """
         validate_space_id(space_id)
 
+        attrs = {}
+        if title is not None:
+            attrs["title"] = title
+        if description is not None:
+            attrs["description"] = IssueInfo.compress_value("description",
+                                                            description)
+        if not attrs:
+            raise DDBArgsError("Issue update needs a title or a description")
+
         update = self._build_update(
             PK=self.issue_pk(space_id, issue_id),
             SK=IssueInfo.KEY_ATTRS["SK"],
             version=version,
-            title=title,
-            description=IssueInfo.compress_value("description", description),
+            **attrs,
         )
         return self.update_issue_item(update, space_id=space_id,
                                       issue_id=issue_id, version=version)
@@ -507,6 +572,9 @@ class IssueMixin:
 
             self.log_client_error(exc)
             raise DDBInternalError(f"Error deleting issue: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(f"Error deleting issue: {exc!s}") from exc
 
     # ------------------------------------------------------------------
     # Issue blockers
@@ -530,6 +598,7 @@ class IssueMixin:
             DDBTerminalStatusError: if the blocked Issue is DONE
             DDBExistsError: if the IssueBlocker already exists
             DDBTransactionConflictError: if every attempt conflicts
+            DDBInternalError: internal database error
         """
         validate_space_id(blocking_issue_space_id)
         validate_space_id(blocked_issue_space_id)
@@ -610,6 +679,10 @@ class IssueMixin:
             self.log_client_error(exc)
             raise DDBInternalError(
                 f"Error adding issue blocker: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(
+                f"Error adding issue blocker: {exc!s}") from exc
 
         return issue_blocker
 
@@ -631,6 +704,7 @@ class IssueMixin:
             DDBArgsError: if either space_id is invalid
             DDBMissingError: if the IssueBlocker does not exist
             DDBTransactionConflictError: if every attempt conflicts
+            DDBInternalError: internal database error
         """
         validate_space_id(blocking_issue_space_id)
         validate_space_id(blocked_issue_space_id)
@@ -671,6 +745,10 @@ class IssueMixin:
                 self.log_client_error(exc)
                 raise DDBInternalError(
                     f"Error deleting issue blocker: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(
+                f"Error deleting issue blocker: {exc!s}") from exc
 
         # The blocker is either already satisfied, in which case the counter
         # was decremented when the blocking Issue went DONE, or it is gone.
@@ -692,6 +770,10 @@ class IssueMixin:
                 raise DDBMissingError("IssueBlocker not found") from exc
 
             self.log_client_error(exc)
+            raise DDBInternalError(
+                f"Error deleting issue blocker: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
             raise DDBInternalError(
                 f"Error deleting issue blocker: {exc!s}") from exc
 
@@ -724,6 +806,8 @@ class IssueMixin:
 
         Raises:
             DDBArgsError: if space_id is invalid
+            DDBTransactionConflictError: if every attempt conflicts
+            DDBInternalError: internal database error
         """
         validate_space_id(space_id)
 
@@ -768,7 +852,8 @@ class IssueMixin:
             )},
         ]
 
-        self.apply_idempotent_transaction(
+        # Any cancellation here means a replayed satisfy already did the work.
+        _applied, _failed_index = self.apply_idempotent_transaction(
             items, "Error satisfying issue blocker")
 
     def handle_issue_deleted(self, *, space_id, issue_id):
@@ -776,19 +861,21 @@ class IssueMixin:
 
         Triggered by an SQS event; see the IssueMixin docstring for the path.
 
-        Nothing the Issue owned may outlive it: no IssueComment, and no
-        IssueBlocker naming it in either direction. Delivery is at-least-once
-        and unordered, so every write conditions on the state it expects and a
-        duplicate event is a no-op.
+        Nothing the Issue owned may outlive it: no IssueComment, no
+        IssueAttachment, and no IssueBlocker naming it in either direction.
+        Delivery is at-least-once and unordered, so every write conditions on
+        the state it expects and a duplicate event is a no-op.
 
         Raises:
             DDBArgsError: if space_id is invalid
+            DDBTransactionConflictError: if every attempt conflicts
+            DDBInternalError: internal database error
         """
         validate_space_id(space_id)
 
-        # Phase 1, everything in this Issue's own partition: its IssueComments
-        # and the IssueBlockers it held over other Issues. One consistent
-        # query, so the sweep acts on a single complete view of the partition
+        # Phase 1, everything in this Issue's own partition: its IssueComments,
+        # its IssueAttachments, and the IssueBlockers it held over other Issues.
+        # One consistent query, so the sweep acts on a single complete view of the partition
         # rather than on a page per row type; see get_issue_partition.
         for item in self.paginate(self.get_issue_partition, space_id=space_id,
                                   issue_id=issue_id):
@@ -814,9 +901,14 @@ class IssueMixin:
 
             if isinstance(item, IssueBlocker):
                 self.delete_blocker_for_sweep(item)
+            elif isinstance(item, IssueAttachment):
+                # The Issue's info row is already gone, so its counter is left
+                # out. The comment's usually is too, since comments sort first;
+                # delete_attachment_with_counters drops it when it finds it gone.
+                self.delete_attachment_with_counters(item, with_issue=False)
             elif isinstance(item, IssueComment):
-                # An IssueComment holds no counter of its own, and the Issue
-                # that counted it is already gone.
+                # No counter work: the Issue that counted it is gone, and its
+                # own num_attachments counts rows this loop is also sweeping.
                 self.delete_row(item)
             else:
                 # Matched explicitly rather than swept by default: a row type
@@ -852,10 +944,14 @@ class IssueMixin:
         through to the plain delete rather than being read as "already done".
         Treating the failure as already-applied is what would leave an
         IssueBlocker outliving the Issue that named it.
+
+        The fall-through is safe only because handle_issue_done makes the
+        decrement itself. AttachmentMixin.delete_attachment_with_counters cannot
+        do the same; see there.
         """
         if not issue_blocker.is_blocking_issue_done:
             blocker_key = self.issue_blocker_key(issue_blocker)
-            applied = self.apply_idempotent_transaction([
+            applied, _failed_index = self.apply_idempotent_transaction([
                 {"Delete": self.active_blocker_delete(blocker_key)},
                 {"Update": self._build_update(
                     PK=self.issue_pk(issue_blocker.blocked_issue_space_id,
@@ -914,6 +1010,9 @@ class IssueMixin:
 
             self.log_client_error(exc)
             raise DDBInternalError(f"Error unblocking issue: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(f"Error unblocking issue: {exc!s}") from exc
 
     @retry_on_transaction_conflict()
     def apply_idempotent_transaction(self, items, message):
@@ -935,11 +1034,19 @@ class IssueMixin:
         re-evaluates against current state, and work another writer already did
         fails its condition and is treated as applied.
 
+        Which item failed is reported, because a cancellation means different
+        things for different items: for a Delete, that the row is already gone;
+        for a counter Update beside it, that the counter's row is gone.
+
         Returns:
-            bool: True if the transaction was applied, False if a condition
-                failed. False does not always mean the work is done: a caller
-                whose conditions were built from a possibly stale read must
-                decide what the failure meant; see delete_blocker_for_sweep.
+            tuple: (applied, failed_index) where applied is whether the
+                transaction was applied and failed_index is the position in
+                items of the first entry whose condition failed, or None when it
+                applied. A failed condition does not always mean the work is
+                done: a caller whose conditions were built from a possibly stale
+                read must decide what the failure of that particular item meant;
+                see delete_blocker_for_sweep and
+                AttachmentMixin.delete_attachment_with_counters.
 
         Raises:
             DDBTransactionConflictError: if every attempt conflicts
@@ -953,9 +1060,12 @@ class IssueMixin:
             for index in range(len(items)):
                 failed, _ = self.failed_reason_item(exc, index)
                 if failed:
-                    return False
+                    return False, index
 
             self.log_client_error(exc)
             raise DDBInternalError(f"{message}: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(f"{message}: {exc!s}") from exc
 
-        return True
+        return True, None

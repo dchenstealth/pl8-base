@@ -196,6 +196,35 @@ class TestUpdateIssue:
         assert loaded.title == "new title"
         assert loaded.description == "new desc"
 
+    def test_title_alone_leaves_the_description(self, ctv, mgr, new_issue):
+        mgr.update_issue(space_id=ctv.space_id, issue_id=new_issue.issue_id,
+                         title="new title")
+
+        loaded = mgr.get_issue(space_id=ctv.space_id,
+                               issue_id=new_issue.issue_id)
+        assert loaded.title == "new title"
+        assert loaded.description == new_issue.description
+
+    def test_description_alone_leaves_the_title(self, ctv, mgr, new_issue,
+                                                get_raw):
+        mgr.update_issue(space_id=ctv.space_id, issue_id=new_issue.issue_id,
+                         description="new desc")
+
+        loaded = mgr.get_issue(space_id=ctv.space_id,
+                               issue_id=new_issue.issue_id)
+        assert loaded.title == new_issue.title
+        assert loaded.description == "new desc"
+        stored = get_raw(new_issue.PK, new_issue.SK)["description"]
+        assert gzip.decompress(stored["B"]).decode() == "new desc"
+
+    def test_neither_is_refused_without_writing(self, ctv, mgr, new_issue):
+        with pytest.raises(DDBArgsError, match="title or a description"):
+            mgr.update_issue(space_id=ctv.space_id,
+                             issue_id=new_issue.issue_id)
+
+        assert mgr.get_issue(space_id=ctv.space_id,
+                             issue_id=new_issue.issue_id).version == 1
+
     def test_bumps_version(self, ctv, mgr, new_issue):
         mgr.update_issue(space_id=ctv.space_id, issue_id=new_issue.issue_id,
                          title="new title", description="new desc")

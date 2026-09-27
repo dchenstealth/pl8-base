@@ -25,3 +25,15 @@ class IssueStatus(StrEnum):
     BLOCKED = "BLOCKED"
     IN_PROGRESS = "IN_PROGRESS"
     DONE = "DONE"
+
+
+class AttachmentStatus(StrEnum):
+    """IssueAttachment upload states.
+
+    PENDING means an upload has been authorized, not that a file is attached.
+    UPLOADED is terminal, which is what keeps num_attachments exactly-once; see
+    AttachmentMixin.confirm_issue_attachment_uploaded.
+    """
+
+    PENDING = "PENDING"
+    UPLOADED = "UPLOADED"

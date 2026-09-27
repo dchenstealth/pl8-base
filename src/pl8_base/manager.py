@@ -4,7 +4,7 @@
 
 import msgspec
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from .const import (
     CONDITION_FAILED_CODE,
@@ -19,7 +19,7 @@ from .errors import (
     DDBTransactionConflictError,
     DDBVersionConflictError,
 )
-from .mixins import CommentMixin, IssueMixin, SpaceMixin
+from .mixins import AttachmentMixin, CommentMixin, IssueMixin, SpaceMixin
 from .types import CLASS_MAP
 from .util import (
     decode_pagination_cursor,
@@ -29,22 +29,50 @@ from .util import (
 )
 
 
-class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
-    def __init__(self, *, dynamodb_client, table_name, logger):
+class BasePL8(IssueMixin, CommentMixin, AttachmentMixin, SpaceMixin):
+    def __init__(self, *, dynamodb_client, table_name, logger,
+                 s3_client=None, bucket_name=None):
         """Init manager.
+
+        s3_client and bucket_name are optional, so a consumer that never
+        touches attachments need not configure S3. Without them the attachment
+        methods raise StorageInternalError.
+
         Args:
             dynamodb_client (boto3.dynamodb): DynamoDB client
             table_name (str): DynamoDB table name to use
             logger (aws_lambda_powertools.Logger): injected structured
                 logger. Extra keyword args are merged into the emitted
                 JSON log record.
+            s3_client (boto3 S3 client or None): client for attachment
+                objects, required only by the attachment methods
+            bucket_name (str or None): bucket attachment objects live in,
+                required only by the attachment methods
         """
         self.dynamodb_client = dynamodb_client
         self.table_name = table_name
         self.logger = logger
+        self.s3_client = s3_client
+        self.bucket_name = bucket_name
         self.ts = TypeSerializer()
         self.td = TypeDeserializer()
 
+
+    def log_aws_error(self, exc):
+        """Log a failed AWS call, from whichever botocore tree it came.
+
+        A BotoCoreError, such as a connection failure, has no exc.response for
+        log_client_error to read.
+
+        Args:
+            exc (ClientError or BotoCoreError): the failure to log
+        """
+        if isinstance(exc, ClientError):
+            self.log_client_error(exc)
+            return
+
+        self.logger.exception(f"BotoCoreError ({type(exc).__name__})",
+                              error=str(exc))
 
     def log_client_error(self, exc):
         """Util method for structured AWS error logging
@@ -194,6 +222,9 @@ class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
         except ClientError as exc:
             self.log_client_error(exc)
             raise DDBInternalError(f"Error loading item: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(f"Error loading item: {exc!s}") from exc
 
         item = resp.get("Item")
         if item is None:
@@ -235,9 +266,14 @@ class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
             self.log_client_error(exc)
             raise DDBInternalError(
                 f"Error deleting {type(item).__name__}: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(
+                f"Error deleting {type(item).__name__}: {exc!s}") from exc
 
     def _build_update(self, *, PK, SK, version=None, expected_vals=None,
-                      excluded_vals=None, increments=None, **attrs):
+                      excluded_vals=None, increments=None, remove_attrs=None,
+                      **attrs):
         """Build an update dict for update_item or transact_write_items.
 
         Every write bumps version and sets updated_at. The version *condition*
@@ -272,6 +308,9 @@ class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
             increments (dict or None): attrs to add to, rather than overwrite.
                 Applied by DynamoDB, so a counter stays correct under
                 concurrent writers where a read-modify-write would not.
+            remove_attrs (iterable or None): attrs to delete from the item.
+                MUST NOT also appear in attrs or increments, which DynamoDB
+                rejects.
             **attrs: attrs to set
 
         Returns:
@@ -295,6 +334,17 @@ class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
             expr_attr_vals[f":incr_{attr}"] = self.serialize_value(delta)
             set_clauses.append(f"#{attr} = #{attr} + :incr_{attr}")
 
+        # REMOVE rather than SET to NULL: attribute_not_exists treats a NULL as
+        # present.
+        remove_clauses = []
+        for attr in (remove_attrs or ()):
+            expr_attr_names[f"#{attr}"] = attr
+            remove_clauses.append(f"#{attr}")
+
+        update_expression = "SET " + ", ".join(set_clauses)
+        if remove_clauses:
+            update_expression += " REMOVE " + ", ".join(remove_clauses)
+
         condition_clauses = ["attribute_exists(#PK)"]
 
         if version is not None:
@@ -317,7 +367,7 @@ class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
                 "PK": self.ts.serialize(PK),
                 "SK": self.ts.serialize(SK),
             },
-            "UpdateExpression": "SET " + ", ".join(set_clauses),
+            "UpdateExpression": update_expression,
             "ConditionExpression": " AND ".join(condition_clauses),
             "ExpressionAttributeNames": expr_attr_names,
             "ExpressionAttributeValues": expr_attr_vals,
@@ -390,6 +440,9 @@ class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
         except ClientError as exc:
             self.log_client_error(exc)
             raise DDBInternalError(f"Error running query: {exc!s}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(f"Error running query: {exc!s}") from exc
 
         items = [self.parse_item(item) for item in resp.get("Items", [])]
         last_evaluated_key = resp.get("LastEvaluatedKey")
@@ -456,5 +509,9 @@ class BasePL8(IssueMixin, CommentMixin, SpaceMixin):
                 **(log_context or {}))
             raise DDBInternalError(
                 f"Error updating {noun}: {ref}") from exc
+        except BotoCoreError as exc:
+            self.log_aws_error(exc)
+            raise DDBInternalError(
+                f"Error updating {noun}: {exc!s}") from exc
 
         return self.parse_item(resp["Attributes"])

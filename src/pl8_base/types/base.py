@@ -116,11 +116,26 @@ class BaseObject(msgspec.Struct, tag=True, tag_field="type",
         return gzip.compress(value.encode())
 
     def serialize(self, *, ts=None):
+        """Serialize this object to a DynamoDB item.
+
+        A key attr that is None is omitted rather than written as NULL, which
+        DynamoDB rejects for an index key; that is how a type keeps an index
+        sparse. Other None fields MUST still serialize as NULL so they
+        round-trip through from_item.
+
+        Args:
+            ts (TypeSerializer or None): serializer to use; one is made if not
+                supplied
+
+        Returns:
+            dict: DynamoDB item, as a map of attr name to AttributeValue
+        """
         if ts is None:
             ts = TypeSerializer()
 
         return {k: ts.serialize(self.compress_value(k, v))
-                for k, v in self.dict().items()}
+                for k, v in self.dict().items()
+                if v is not None or k not in self.KEY_ATTRS}
 
     def serialized_pk(self, *, ts=None):
         if ts is None:
