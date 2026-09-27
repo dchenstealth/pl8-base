@@ -429,22 +429,23 @@ class IssueMixin:
         }, cursor=cursor, limit=limit)
 
     @retry_on_transaction_conflict()
-    def update_issue(self, *, space_id, issue_id, title, description,
+    def update_issue(self, *, space_id, issue_id, title=None, description=None,
                      version=None):
-        """Update an Issue's title and description.
+        """Update an Issue's title, description, or both.
 
         Args:
             space_id (str): id of the issue's space
             issue_id (str): id of the issue
-            title (str): new issue title
-            description (str): new issue description
+            title (str or None): new issue title, or None to leave it
+            description (str or None): new issue description, or None to
+                leave it
             version (int or None): if set, fence the write on this version
 
         Returns: IssueInfo
 
         Raises:
-            DDBArgsError: if space_id is invalid, or description is not a
-                string
+            DDBArgsError: if space_id is invalid, neither title nor description
+                is given, or description is not a string
             DDBMissingError: if the Issue does not exist
             DDBVersionConflictError: if version is set and did not match
             DDBTransactionConflictError: if every attempt conflicts
@@ -452,12 +453,20 @@ class IssueMixin:
         """
         validate_space_id(space_id)
 
+        attrs = {}
+        if title is not None:
+            attrs["title"] = title
+        if description is not None:
+            attrs["description"] = IssueInfo.compress_value("description",
+                                                            description)
+        if not attrs:
+            raise DDBArgsError("Issue update needs a title or a description")
+
         update = self._build_update(
             PK=self.issue_pk(space_id, issue_id),
             SK=IssueInfo.KEY_ATTRS["SK"],
             version=version,
-            title=title,
-            description=IssueInfo.compress_value("description", description),
+            **attrs,
         )
         return self.update_issue_item(update, space_id=space_id,
                                       issue_id=issue_id, version=version)
