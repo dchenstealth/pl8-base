@@ -32,50 +32,33 @@ CONDITION_FAILED_CODE = "ConditionalCheckFailedException"
 # Name of the single GSI on the base table
 GSI1_INDEX_NAME = "GSI1"
 
-# Upper bound on an IssueAttachment's declared size. The presigned POST is
-# signed with a content-length-range condition built from it, so S3 itself
-# refuses a body that disagrees; this bound is what keeps a caller from having
-# a 5 GB object signed for in the first place.
+# Upper bound on an IssueAttachment's declared size, checked before an upload
+# is signed.
 MAX_ATTACHMENT_SIZE_BYTES = 100 * 1024 * 1024
 
-# Bounded because the name is interpolated into the signed
-# ResponseContentDisposition of a presigned download URL, and because it rides
-# in the row rather than in the S3 key; see util.validate_attachment_name.
+# Bounded because the name is signed into every download URL; see
+# util.validate_attachment_name.
 MAX_ATTACHMENT_NAME_LEN = 128
 
-# Bounded for the same reason: the content type becomes a signed condition in
-# the presigned POST policy; see util.validate_content_type.
+# Bounded because the content type is stored on the S3 object and served back
+# on every download; see util.validate_content_type.
 MAX_CONTENT_TYPE_LEN = 128
 
-# How long a PENDING IssueAttachment row is allowed to sit before DynamoDB's
-# TTL reaps it. An initiated upload that is never confirmed would otherwise be
-# an orphan row forever: nothing else deletes it, since the caller that would
-# have confirmed it is the one that went away. A day is long enough that a
-# caller retrying a large upload across expired URLs (see
-# resign_issue_attachment_upload) is never reaped mid-retry.
-#
-# Reaping a PENDING row is safe precisely because a PENDING attachment is not
-# counted: confirm is what moves num_attachments, so a row removed before it
-# lands leaves no counter behind. TTL deletion is an ordinary delete as far as
-# the stream is concerned, so IssueAttachmentDeleted still cleans up whatever
-# partial object S3 holds.
+# How long a PENDING IssueAttachment lives before DynamoDB's TTL deletes it,
+# counted from creation and never extended. Nothing else would ever delete an
+# upload that was started and never confirmed. Safe because PENDING rows are
+# not counted, and the delete still emits IssueAttachmentDeleted, which removes
+# any object that was uploaded.
 ATTACHMENT_PENDING_TTL_SECONDS = 86400
 
-# Lifetime of every presigned URL and POST minted here. Short on purpose: the
-# URL is a bearer credential for one object, so it is cheaper to re-sign (no
-# API call is made to sign) than to hand out a long-lived one.
+# Lifetime of every presigned URL and POST. Short because a presigned URL is a
+# bearer credential, and re-signing is cheap.
 PRESIGN_EXPIRY_SECONDS = 300
 
-# Sort key prefix of an IssueAttachment row. 600 sits between IssueComment's
-# 500 and IssueBlocker's 800, so a bare PK query on an Issue's partition
-# returns its info row, then its comments, then its attachments, then its
-# blockers. Leaving gaps between the groups is what lets a row type be added
-# later without renumbering the ones already stored; see
-# dchenstealth/docs guidelines/dynamodb_keys.md.
+# Sort key prefix of an IssueAttachment row, between IssueComment's 500 and
+# IssueBlocker's 800; see dchenstealth/docs guidelines/dynamodb_keys.md.
 ATTACHMENT_SK_PREFIX = "600#ATTACHMENT#"
 
-# Attribute DynamoDB's TTL is configured against on the base table. Only an
-# IssueAttachment ever carries it, and only while it is PENDING: confirm
-# removes the attribute rather than setting it to a later time, so a confirmed
-# attachment has no expiry to be reaped by.
+# Attribute DynamoDB's TTL is configured against. Only a PENDING
+# IssueAttachment carries it; confirm removes it.
 ATTACHMENT_TTL_ATTR = "expires_at"

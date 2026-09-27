@@ -108,17 +108,8 @@ class IssueReady(BaseEvent):
 class IssueCommentDeleted(BaseEvent):
     """Core lifecycle event.
 
-    Sent when an IssueComment is deleted. Triggers the IssueAttachments linked
-    to that comment to be deleted, which in turn drives their S3 objects away
-    via IssueAttachmentDeleted.
-
-    One counter moves and one does not, and the handler will not work if they
-    are confused. The comment's own num_attachments is not decremented, because
-    it lived on the row that is already gone. The Issue's num_attachments is,
-    because the Issue is still standing and every UPLOADED attachment being
-    deleted here was counted against it; leaving it alone would make it
-    overcount its attachments permanently. See
-    AttachmentMixin.handle_issue_comment_deleted, which has the full argument.
+    Sent when an IssueComment is deleted. Triggers deletion of the
+    IssueAttachments linked to it.
     """
     type_version: str = "0.0.1"
 
@@ -130,10 +121,8 @@ class IssueCommentDeleted(BaseEvent):
 class IssueAttachmentDeleted(BaseEvent):
     """Core lifecycle event.
 
-    Sent when an IssueAttachment row is deleted, however it was deleted: by a
-    caller, by one of the delete sweeps, or by DynamoDB's TTL reaping an upload
-    that was never confirmed. Triggers the S3 object to be deleted, so the
-    bytes never outlive the row that named them.
+    Sent when an IssueAttachment row is deleted by any means, including TTL
+    expiry. Triggers deletion of its S3 object.
     """
     type_version: str = "0.0.1"
 

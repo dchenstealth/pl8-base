@@ -34,16 +34,9 @@ class BasePL8(IssueMixin, CommentMixin, AttachmentMixin, SpaceMixin):
                  s3_client=None, bucket_name=None):
         """Init manager.
 
-        s3_client and bucket_name are optional, for the same reason
-        util.send_event takes its EventBridge client explicitly rather than
-        reading one off a manager: a consumer that never touches attachments
-        should not have to configure object storage to read an Issue. Every
-        other entity works with them unset.
-
-        When they are unset the attachment methods raise StorageInternalError
-        rather than AttributeError or a boto3 error about a bucket named None,
-        so a manager missing its storage configuration says so; see
-        AttachmentMixin.require_storage.
+        s3_client and bucket_name are optional, so a consumer that never
+        touches attachments need not configure S3. Without them the attachment
+        methods raise StorageInternalError.
 
         Args:
             dynamodb_client (boto3.dynamodb): DynamoDB client
@@ -292,12 +285,9 @@ class BasePL8(IssueMixin, CommentMixin, AttachmentMixin, SpaceMixin):
             increments (dict or None): attrs to add to, rather than overwrite.
                 Applied by DynamoDB, so a counter stays correct under
                 concurrent writers where a read-modify-write would not.
-            remove_attrs (iterable or None): attrs to delete from the item, as
-                one REMOVE clause on the same UpdateExpression as the SET. An
-                attr MUST NOT appear here and in attrs or increments as well:
-                DynamoDB rejects an expression that touches one path twice, so
-                that is a malformed request rather than a last-write-wins.
-                Removing an absent attr is a no-op, not an error.
+            remove_attrs (iterable or None): attrs to delete from the item.
+                MUST NOT also appear in attrs or increments, which DynamoDB
+                rejects.
             **attrs: attrs to set
 
         Returns:
@@ -321,11 +311,8 @@ class BasePL8(IssueMixin, CommentMixin, AttachmentMixin, SpaceMixin):
             expr_attr_vals[f":incr_{attr}"] = self.serialize_value(delta)
             set_clauses.append(f"#{attr} = #{attr} + :incr_{attr}")
 
-        # REMOVE, not `SET #attr = :null`. Only an absent attribute is absent:
-        # a NULL is a value, and DynamoDB's TTL, a sparse index and
-        # attribute_not_exists all read a NULL as present. Dropping
-        # ATTACHMENT_TTL_ATTR on confirm is what takes a confirmed attachment
-        # out of the reaper's reach for good, so it has to actually be gone.
+        # REMOVE rather than SET to NULL: attribute_not_exists treats a NULL as
+        # present.
         remove_clauses = []
         for attr in (remove_attrs or ()):
             expr_attr_names[f"#{attr}"] = attr

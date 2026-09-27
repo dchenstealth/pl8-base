@@ -52,9 +52,8 @@ class IssueInfo(BaseObject):
     # see mixins/issue.py issue_num_comments_update.
     num_comments: int = 0
 
-    # The number of UPLOADED IssueAttachments on this Issue, linked to one of
-    # its comments or not. A PENDING attachment is deliberately not counted:
-    # its bytes may never arrive, and its row may be reaped by TTL.
+    # The number of UPLOADED IssueAttachments on this Issue, linked or not.
+    # PENDING ones are not counted, since their bytes may never arrive.
     # MUST be enforced atomically via transactions, and MUST NOT move version;
     # see mixins/issue.py issue_num_attachments_update.
     num_attachments: int = 0
@@ -112,10 +111,8 @@ class IssueComment(BaseObject):
     creator: str
     comment_id: str | None = None
 
-    # The number of UPLOADED IssueAttachments linked to this comment. The same
-    # attachment is also counted on the Issue, so the two counters overlap by
-    # design: an attachment belongs to the Issue and is optionally attributed
-    # to one of its comments.
+    # The number of UPLOADED IssueAttachments linked to this comment. Each is
+    # also counted on the Issue.
     # MUST be enforced atomically via transactions, and MUST NOT move version;
     # see mixins/issue.py comment_num_attachments_update.
     num_attachments: int = 0
@@ -138,39 +135,10 @@ class IssueComment(BaseObject):
 class IssueAttachment(BaseObject):
     """Item representing a file attached to an Issue, stored in S3.
 
-    The row and the object are two halves of one attachment, and the row comes
-    first: it is what the presigned POST is signed against, so it exists while
-    the bytes are still in flight. status is which half is true yet; see
-    types/enums.py AttachmentStatus.
-
-    Shares the Issue's partition, like an IssueComment, so an Issue's whole
-    attachment list is one query and no GSI carries it. The 600 prefix sits
-    between the comments' 500 and the blockers' 800, so a bare PK query returns
-    the Issue, then its comments, then its attachments, then its blockers.
-
-    attachment_id is a UUIDv7 and created_at is read back out of it, exactly as
-    IssueComment's is and for the same reasons: ordering by sort key is
-    ordering by creation time, and the attachment stays addressable by its id
-    alone. See util.isotime_from_uuid7.
-
-    An attachment MAY be linked to one of the Issue's IssueComments, which is
-    what comment_id records. GSI1 is that link, so the index is sparse: an
-    unlinked attachment has no GSI1 keys at all and is simply not in it. The
-    keys are rendered only when comment_id is set (see __post_init__) and
-    BaseObject.serialize omits a key attr that is None, which is what makes
-    that expressible in a row DynamoDB will accept.
-
-    An IssueAttachment MUST NOT outlive its Issue, and a linked one MUST NOT
-    outlive its IssueComment. The Issue's num_attachments and, when linked, the
-    comment's hold the first half atomically with every counted write, and the
-    handle_* sweeps remove the rows once the parent is gone. The S3 object is
-    removed by handle_issue_attachment_deleted, driven off this row's delete,
-    so the object never outlives the row either.
+    Lives in the Issue's partition, like an IssueComment, and like one takes
+    its created_at from its UUIDv7 id. GSI1 holds only attachments linked to
+    a comment.
     """
-    # The sort key prefix is composed from const rather than spelled out,
-    # unlike IssueComment's literal "500#COMMENT#", because this one is also a
-    # query bound: AttachmentMixin ranges over it to read an Issue's
-    # attachments out of the partition the Issue shares with its other rows.
     KEY_ATTRS: ClassVar[MappingProxyType] = MappingProxyType({
         "PK": "ISSUE#{space_id}#{issue_id}",
         "SK": ATTACHMENT_SK_PREFIX + "{attachment_id}",
@@ -180,17 +148,9 @@ class IssueAttachment(BaseObject):
     })
     COMPRESSED_ATTRS: ClassVar[set[str]] = set()
 
-    # The S3 key an attachment's bytes live under. A format string on the class,
-    # not a stored field, for the same reason PK and SK are: the layout lives in
-    # exactly one place, and a row can never carry a key that disagrees with it.
-    #
-    # space_id is in the key even though attachment_id alone is unique. An
-    # issue_id is only unique within its Space, so a key without the Space
-    # would put two Spaces' Issues under one prefix, and everything that acts
-    # on an S3 prefix would then span Spaces: an IAM policy scoped to a
-    # Space's prefix, a lifecycle rule, or a prefix delete cleaning up one
-    # Space. The Space boundary has to be above the Issue in the key for any of
-    # those to be expressible.
+    # The S3 key an attachment's bytes live under. Includes space_id because an
+    # issue_id is only unique within a Space, and an S3 prefix is the only
+    # boundary IAM policies and lifecycle rules can scope to.
     S3_KEY_FORMAT: ClassVar[str] = (
         "space/{space_id}/issue/{issue_id}/attachments/{attachment_id}")
 
@@ -208,15 +168,14 @@ class IssueAttachment(BaseObject):
     size: int
     attachment_id: str | None = None
 
-    # The IssueComment this attachment is attributed to, or None for one
-    # attached to the Issue itself. Fixed at creation: moving an attachment
-    # between comments would rewrite its GSI1 keys, and nothing here does that.
+    # The IssueComment this attachment is attributed to, or None. Fixed at
+    # creation, since it decides which comment's deletion takes it.
     comment_id: str | None = None
 
     status: AttachmentStatus = AttachmentStatus.PENDING
 
-    # Unix seconds DynamoDB's TTL reaps this row at, set only while the row is
-    # PENDING and removed by confirm; see const.ATTACHMENT_PENDING_TTL_SECONDS.
+    # Unix seconds at which TTL deletes this row, set only while PENDING; see
+    # const.ATTACHMENT_PENDING_TTL_SECONDS.
     expires_at: int | None = None
 
     def __post_init__(self):
@@ -225,29 +184,16 @@ class IssueAttachment(BaseObject):
         if not self.attachment_id:
             self.attachment_id = str(uuid7())
 
-        # created_at is read back out of the id rather than taken from a second
-        # clock reading, so the two cannot disagree about when the attachment
-        # was initiated. Setting it here also makes the base class skip it.
+        # Read out of the id so the two cannot disagree. Setting it here also
+        # makes the base class skip it.
         if not self.created_at:
             self.created_at = isotime_from_uuid7(self.attachment_id)
 
         super().__post_init__()
 
-        # GSI1 is the comment link, so an unlinked attachment must not be in
-        # the index at all. BaseObject.__post_init__ renders every KEY_ATTRS
-        # entry that is still None from one self.dict() snapshot, and it has no
-        # notion of a key that only sometimes applies, so with comment_id=None
-        # it has just produced the literal
-        # "COMMENTATTACHMENT#{space_id}#{issue_id}#None": every unlinked
-        # attachment in the table filed under one garbage index partition,
-        # returned by a get_issue_comment_attachments call for a comment whose
-        # id is the string "None". Take the render back rather than let that
-        # reach a row; serialize() then omits the attributes entirely, which is
-        # what makes the index sparse.
-        #
-        # Done after super() rather than before because there is no way to ask
-        # that pass to skip an entry: it renders whatever is None, so a value
-        # put here to fence it off would be the value that got stored.
+        # super() rendered GSI1 keys with a literal "None" for an unlinked
+        # attachment. Clear them so serialize() omits them and the row stays
+        # out of the index.
         if self.comment_id is None:
             self.GSI1PK = None
             self.GSI1SK = None

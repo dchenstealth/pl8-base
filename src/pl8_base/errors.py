@@ -82,51 +82,30 @@ class DDBSpaceNotEmptyError(DDBError):
 class DDBAttachmentStatusError(DDBError):
     """Raised when an IssueAttachment is not in the status the operation needs.
 
-    Every case is the PENDING/UPLOADED transition being one-way; see
-    types.enums.AttachmentStatus:
-    * confirm_issue_attachment_uploaded found a row that is not PENDING, which
-      normally means the upload was already confirmed. The counters moved on
-      that first confirm and this call changed nothing, so a caller that is
-      only making sure the upload landed may treat this as success; one that
-      believes it is confirming a fresh upload has an id that is not the one it
-      thinks it is.
-    * resign_issue_attachment_upload was asked to re-sign an upload for a row
-      that is no longer PENDING. There is nothing left to upload; the caller
-      should read the attachment instead.
-
-    Retrying either call unchanged will fail the same way. The status only ever
-    moves forward.
+    From confirm or re-sign on an attachment that is already UPLOADED. A caller
+    confirming only to make sure its upload landed may treat this as success.
+    Retrying will fail the same way.
     """
 
 
 class StorageError(Exception):
     """Base class for object storage (S3) issues.
 
-    Deliberately not a DDBError: an attachment is a row plus an object, and
-    which half failed is what a caller needs to tell apart. A StorageError
-    means the row is fine and the bytes are not.
+    Not a DDBError, so a caller can tell a failed object from a failed row.
     """
 
 
 class StorageInternalError(StorageError):
     """Raised for general object storage errors, and for a manager asked to do
-    attachment work it was not configured for.
-
-    Covers an S3 call failing for any reason that is not a missing object, and
-    a BasePL8 constructed without an s3_client or a bucket_name reaching one of
-    the attachment methods. The first is worth retrying, the second is a
-    deployment that needs fixing; the message says which.
+    attachment work without an s3_client or bucket_name.
     """
 
 
 class StorageObjectMissingError(StorageError):
     """Raised when an attachment's S3 object does not exist.
 
-    Raised by confirm_issue_attachment_uploaded when the object it was told to
-    confirm is not there, which is the ordinary outcome of a caller confirming
-    before its upload finished, or of an upload that silently never happened.
-    The attachment row is untouched and still PENDING, so the caller may upload
-    (re-signing if its URL has expired) and confirm again.
+    Usually a confirm that arrived before the upload finished. The row is still
+    PENDING, so the caller may upload and confirm again.
     """
 
 

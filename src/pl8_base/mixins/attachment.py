@@ -4,49 +4,9 @@
 
 """IssueAttachment operations.
 
-An attachment is two things that must agree: a row in DynamoDB and an object in
-S3. The row is written first, because it is what the presigned POST is signed
-against, and AttachmentStatus is which of the two is true yet. PL8 never
-handles the bytes: a caller uploads them to S3 with a presigned POST and
-downloads them with a presigned GET, and everything here is the bookkeeping
-around those two URLs.
-
-The invariants, and where each is held:
-
-* An attachment's row and object MUST NOT outlive each other. The row is the
-  record of the object, so it goes first and the object follows: deleting the
-  row emits IssueAttachmentDeleted, and handle_issue_attachment_deleted deletes
-  the object. An object with no row is therefore only ever in flight, and a
-  PENDING row's expiry (const.ATTACHMENT_PENDING_TTL_SECONDS) is what keeps an
-  upload that never completed from being a row forever.
-
-* An IssueAttachment MUST NOT outlive its Issue, and a linked one MUST NOT
-  outlive its IssueComment. IssueMixin.handle_issue_deleted sweeps the Issue's
-  partition, handle_issue_comment_deleted below sweeps one comment's
-  attachments, and both are driven by events off the row deletes.
-
-* IssueInfo.num_attachments, and IssueComment.num_attachments for a linked
-  attachment, MUST count exactly the UPLOADED attachments. The whole argument
-  for that is the one-way status transition: confirm conditions its write on
-  status = PENDING and moves the counters in the same transaction, so a
-  replayed confirm re-fails the condition and the transaction is a no-op, while
-  delete conditions its decrement on status = UPLOADED so a PENDING attachment,
-  which was never counted, never decrements. See types/enums.py
-  AttachmentStatus.
-
-  This is a deliberate departure from the idiom CommentMixin and SpaceMixin
-  establish, where the counter increment IS the parent-existence fence, applied
-  in the same transaction as the child row's Put. Anyone who reads those first
-  will assume it still holds here, and it does not: initiate writes the
-  attachment row with plain ConditionChecks on the parents and moves no
-  counter, because the row it writes describes an upload that may never happen.
-  The parents are fenced twice instead, once at initiate and again at confirm,
-  and the counters move only at confirm.
-
-Every public method validates its space_id before it reaches a key, the same as
-IssueMixin, CommentMixin and SpaceMixin do, and every method that signs a URL
-first checks that this manager was given something to sign against; see
-require_storage.
+An attachment is a DynamoDB row plus an S3 object. PL8 never handles the bytes:
+callers upload and download them with presigned URLs, and this mixin keeps the
+row, its status and the counters in step with them.
 """
 
 import time
@@ -81,26 +41,18 @@ from ..util import (
     validate_space_id,
 )
 
-# Error code S3 reports for a HeadObject against a key that is not there.
-# HeadObject has no response body to put an error code in, so S3 answers with a
-# bare 404 and botocore surfaces the status as the code; it is NOT the NoSuchKey
-# a GetObject would raise. Both are matched anyway, so that a client or a
-# stand-in that does report NoSuchKey is read the same way.
+# HeadObject has no body to carry an error code, so a missing key surfaces as
+# "404" rather than the NoSuchKey GetObject raises. All are matched.
 OBJECT_MISSING_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
 
-# How many conditioned attempts delete_attachment_with_counters makes before it
-# gives up. Not a retry budget for contention, which
-# apply_idempotent_transaction handles a rung at a time, but the exact worst
-# case of its ladder: one attempt that may find the row confirmed since the read
-# (status moves one way, so at most one), plus one dropped attempt per counter
-# row that turns out to be gone (the Issue's and the comment's), plus the
-# attempt that then has nothing left to be wrong about.
+# The worst case of delete_attachment_with_counters' ladder: one attempt that
+# finds the row confirmed since the read, one per counter row found gone, and
+# the final attempt.
 ATTACHMENT_DELETE_ATTEMPTS = 4
 
 
 class AttachmentMixin:
-    """IssueAttachment operations; see this module's docstring for the
-    invariants and where each is held."""
+    """IssueAttachment operations."""
 
     # ------------------------------------------------------------------
     # Key and storage helpers
@@ -120,10 +72,8 @@ class AttachmentMixin:
     def attachment_s3_key(self, space_id, issue_id, attachment_id):
         """The S3 key an attachment's object lives under.
 
-        Recomputed from the ids rather than read off a row, so a caller that no
-        longer has the row, handle_issue_attachment_deleted in particular, can
-        still name the object. Shares IssueAttachment's format string, so the
-        layout is still defined in exactly one place.
+        Built from the ids rather than a row, so handle_issue_attachment_deleted
+        can name the object after the row is gone.
         """
         return IssueAttachment.S3_KEY_FORMAT.format(
             space_id=space_id, issue_id=issue_id, attachment_id=attachment_id)
@@ -131,11 +81,8 @@ class AttachmentMixin:
     def require_storage(self):
         """Refuse an attachment operation on a manager with no storage.
 
-        s3_client and bucket_name are optional on BasePL8 so that consumers
-        which never touch attachments need not configure S3; see
-        BasePL8.__init__. That makes this the place where a manager missing
-        them is reported, rather than as an AttributeError on None or a boto3
-        complaint about a bucket named None several frames deeper.
+        s3_client and bucket_name are optional on BasePL8, so this reports a
+        missing one clearly rather than as an AttributeError on None.
 
         Raises:
             StorageInternalError: if this manager has no S3 client or bucket
@@ -148,12 +95,9 @@ class AttachmentMixin:
     def log_signing_error(self, exc):
         """Log a failure to sign, from whichever botocore tree it came.
 
-        manager.log_client_error reads exc.response, which only a ClientError
-        has. A NoCredentialsError or NoRegionError would therefore become an
-        AttributeError inside the very handler meant to report it, which is
-        worse than the unreported failure it replaced. Signing makes no API
-        call, so those are the failures it actually has; see
-        presigned_attachment_post.
+        Signing makes no API call, so its failures are mostly
+        NoCredentialsError and NoRegionError. Those are BotoCoreErrors, not
+        ClientErrors, and have no exc.response for log_client_error to read.
 
         Args:
             exc (ClientError or BotoCoreError): the failure to log
@@ -168,17 +112,9 @@ class AttachmentMixin:
     def presigned_attachment_post(self, attachment):
         """A presigned POST a caller can upload this attachment's bytes with.
 
-        The size is signed in as an exact content-length-range, low and high
-        both the declared size, because the caller declared that size when it
-        initiated the upload. S3 then refuses any other body length, which is
-        what makes IssueAttachment.size S3's fact as well as the caller's claim
-        even before confirm reads it back off the object. Content-Type is
-        signed in the same way, as both a field and a condition.
-
-        Signing is local: it derives a signature from the credentials this
-        client already holds and makes no call to S3, so this is cheap and a
-        URL may be minted for an object that does not exist yet, which is the
-        entire point of it.
+        The declared size is signed in as an exact content-length-range, and
+        the content type as both a field and a condition, so S3 refuses any
+        other upload.
 
         Args:
             attachment (IssueAttachment): the row to sign an upload for
@@ -206,13 +142,7 @@ class AttachmentMixin:
                 ExpiresIn=PRESIGN_EXPIRY_SECONDS,
             )
         except (ClientError, BotoCoreError) as exc:
-            # Not a failed API call, since signing makes none: a client that
-            # cannot resolve credentials or a region to sign with. Those arrive
-            # as NoCredentialsError and NoRegionError, which are BotoCoreError
-            # subclasses and NOT ClientError, so catching ClientError alone
-            # caught nothing this can actually raise and let a raw botocore
-            # exception past the Raises contract below. The interface layer only
-            # knows DDB* and Storage*, so both trees are caught here.
+            # See log_signing_error for why both trees.
             self.log_signing_error(exc)
             raise StorageInternalError(
                 f"Error signing attachment upload: {exc!s}") from exc
@@ -220,13 +150,9 @@ class AttachmentMixin:
     def presigned_attachment_url(self, attachment):
         """A presigned GET a caller can download this attachment's bytes with.
 
-        Carries the attachment's name as a signed ResponseContentDisposition,
-        which is how the human-readable filename reaches the downloader without
-        `name` ever entering the S3 key: S3 echoes the header back on the
-        response, so the browser saves the file under the name the caller gave
-        rather than under an opaque uuid. Signed, so a holder of the URL cannot
-        rewrite the name; validated on the way in, so the name cannot break out
-        of the quoted header value it is interpolated into; see
+        Carries the attachment's name in a signed ResponseContentDisposition,
+        so the file downloads under its name rather than its id. The name is
+        validated so it cannot break out of the header; see
         util.validate_attachment_name.
 
         Args:
@@ -254,18 +180,13 @@ class AttachmentMixin:
                 ExpiresIn=PRESIGN_EXPIRY_SECONDS,
             )
         except (ClientError, BotoCoreError) as exc:
-            # Both trees, for the reason presigned_attachment_post gives: a
-            # client with no credentials or no region raises BotoCoreError
-            # subclasses, not ClientError.
+            # See log_signing_error for why both trees.
             self.log_signing_error(exc)
             raise StorageInternalError(
                 f"Error signing attachment download: {exc!s}") from exc
 
     def head_attachment_object(self, attachment):
         """The S3 metadata of an attachment's object.
-
-        What confirm asks S3 for rather than trusting the caller: the size and
-        content type here are properties of the bytes that actually landed.
 
         Args:
             attachment (IssueAttachment): the row whose object to head
@@ -303,29 +224,14 @@ class AttachmentMixin:
                                          comment_id=None):
         """Write a PENDING IssueAttachment and sign an upload for it.
 
-        The row exists before the bytes do, because it is what the presigned
-        POST is signed against: its attachment_id is the S3 key, and the size
-        and content type it records are the conditions the upload is signed
-        with. Nothing is attached to the Issue as far as any reader is
-        concerned until confirm_issue_attachment_uploaded lands.
+        Unlike IssueComment, no counter moves here, so the counter increment
+        cannot double as the parent-existence check. The Issue and any named
+        IssueComment are checked with plain ConditionChecks instead, and the
+        counters move on confirm: a PENDING upload may never happen, so it is
+        not counted.
 
-        No counter moves here, which is worth stopping on: it is a deliberate
-        departure from the idiom CommentMixin and SpaceMixin establish, where
-        the counter increment on the parent row IS the parent-existence fence
-        and is applied in the same transaction as the child's Put. An upload
-        that is only authorized must not be counted, so the parents are fenced
-        with plain ConditionChecks instead and the counters move on confirm.
-        The parents are therefore checked twice, once here and once there, and
-        the second check is the one the counters hang off.
-
-        The Issue and, when given, the IssueComment are checked in the same
-        transaction as the Put so the row cannot be written into a partition no
-        Issue owns, or be linked to a comment that is not there.
-
-        The row carries an expires_at: a caller that never uploads or never
-        confirms would otherwise leave a row behind forever, since it is the
-        only party that knew about it. See
-        const.ATTACHMENT_PENDING_TTL_SECONDS.
+        The row expires after const.ATTACHMENT_PENDING_TTL_SECONDS unless it
+        is confirmed.
 
         Args:
             space_id (str): id of the issue's space
@@ -360,9 +266,7 @@ class AttachmentMixin:
         if comment_id is not None:
             validate_comment_id(comment_id)
 
-        # Checked before the row is written, not after: a manager with no
-        # bucket can never produce a usable attachment, so it must not leave a
-        # PENDING row behind for the TTL to clean up either.
+        # Before the write, so a manager with no bucket leaves no PENDING row.
         self.require_storage()
 
         attachment = IssueAttachment(
@@ -377,26 +281,12 @@ class AttachmentMixin:
             expires_at=int(time.time()) + ATTACHMENT_PENDING_TTL_SECONDS,
         )
 
-        # Signed before the row is written, not after. Signing needs nothing but
-        # the attachment's own s3_key, content_type and size, all of which exist
-        # as soon as __post_init__ mints the id, so the order is free to choose
-        # and only one of the two orders is safe. Signing after the Put means a
-        # signing failure leaves a PENDING row nobody asked for, which is
-        # exactly what the paragraph above about require_storage refuses to do.
-        #
-        # The inverse failure is harmless, which is why this is not a trade:
-        # if signing succeeds and the Put then fails, the URL is discarded
-        # inside this frame and was never returned to anyone, and nobody can
-        # upload to a URL they never received. So it cannot leave an orphaned
-        # object behind, and there is nothing to clean up. Do not "simplify"
-        # this back by moving the signing below the transaction.
+        # Signed before the write, so a signing failure leaves no row behind. A
+        # write failing after signing is harmless: the URL is never returned.
         post = self.presigned_attachment_post(attachment)
 
-        # Ordering is load-bearing: CancellationReasons come back positionally.
-        # The comment check is only present when a comment was named, so the
-        # Put is item 1 for an unlinked attachment and item 2 for a linked one;
-        # put_index below is what keeps the reasons read against the right
-        # items.
+        # CancellationReasons are positional, and the comment check is only
+        # present when a comment was named, hence put_index.
         items = [
             {"ConditionCheck": {
                 "TableName": self.table_name,
@@ -441,10 +331,8 @@ class AttachmentMixin:
 
             failed, _ = self.failed_reason_item(exc, put_index)
             if failed:
-                # Not rerolled into a new id, for the same reason
-                # create_issue_comment does not reroll: a UUIDv7 clash is not
-                # contention to retry past but a sign that ids are not being
-                # minted as assumed.
+                # Not rerolled: a UUIDv7 clash means ids are not being minted
+                # as assumed, as in create_issue_comment.
                 raise DDBExistsError(
                     f"IssueAttachment exists: "
                     f"{attachment.attachment_id}") from exc
@@ -459,25 +347,9 @@ class AttachmentMixin:
                                        attachment_id):
         """A fresh presigned POST for an IssueAttachment still awaiting bytes.
 
-        A presigned POST lasts const.PRESIGN_EXPIRY_SECONDS, and a caller whose
-        URL expired mid-retry has a perfectly good PENDING row it should keep
-        using. Without this it would have to initiate again, stranding the first
-        row for the TTL to reap and having already been charged for whatever
-        bytes the abandoned upload transferred.
-
-        Not for an upload that is merely slow: S3 applies the deadline when the
-        request begins, so a large upload on a slow link that started in time is
-        not cut off by it. The expiry is time to start an upload, not time to
-        keep one around; see pl8-docs architecture/backend/storage.md.
-
-        Re-signs from the row's own size and content_type rather than from
-        anything passed in. Those are what the eventual confirm compares
-        against and what the original POST was signed with, so re-signing
-        against new values would quietly change the terms of the upload, and an
-        attachment's declared size is fixed at initiate.
-
-        The status is deliberately not moved: the row stays PENDING, which is
-        the state that lets the eventual confirm count it exactly once.
+        For a caller whose upload URL expired between attempts. Signs from the
+        row's own size and content type and leaves the row, including its
+        expiry, unchanged.
 
         Args:
             space_id (str): id of the issue's space
@@ -515,24 +387,9 @@ class AttachmentMixin:
                                           attachment_id):
         """Mark an IssueAttachment UPLOADED and count it.
 
-        The object is headed before anything is written, so a confirm that
-        arrives before the upload finished leaves the row PENDING, the counters
-        untouched, and the caller free to upload and confirm again.
-
-        size and content_type are written back from the HEAD response, so the
-        row records what S3 actually holds rather than what the caller claimed
-        at initiate. The presigned POST's conditions mean the two normally
-        agree; this is what makes that a fact about the row rather than an
-        assumption about the upload.
-
-        The `status = PENDING` condition on the attachment is the entire
-        correctness argument for the counters. Both this call and the event
-        paths around it are at-least-once, so a replayed confirm must not
-        increment twice: it cannot, because the status has already moved and
-        DynamoDB cancels the whole transaction on that condition, counters
-        included. The increment therefore happens exactly once, on whichever
-        attempt first finds the row PENDING. See types/enums.py
-        AttachmentStatus.
+        The object is headed first, so confirming before the upload lands
+        changes nothing and may be retried. The row takes its size and content
+        type from S3 rather than from the caller's declaration.
 
         Args:
             space_id (str): id of the issue's space
@@ -556,40 +413,33 @@ class AttachmentMixin:
         """
         validate_space_id(space_id)
 
-        # Read for the comment link and the S3 key, not for the status: the row
-        # read here may be stale by the time the transaction runs, so the
-        # status is fenced by a condition rather than by this read. comment_id
-        # is fixed at initiate, so it cannot go stale.
+        # Read for the comment link and the S3 key, which never change. The
+        # status is fenced by the transaction's condition, not by this read.
         attachment = self.get_primary_item(
             PK=self.issue_pk(space_id, issue_id),
             SK=self.attachment_sk(attachment_id))
 
         head = self.head_attachment_object(attachment)
         size = head["ContentLength"]
-        # ContentType is always on a real HeadObject response, since S3 stores
-        # binary/octet-stream for an upload that declares nothing. The fallback
-        # to the declared type is only so a client that omits it cannot become a
-        # KeyError halfway through building the transaction.
+        # S3 always reports a ContentType; the fallback only guards a client
+        # that omits it.
         content_type = head.get("ContentType") or attachment.content_type
 
-        # Passed in rather than left to _build_update's own isotime() call, so
-        # the value written is the one this method can report back.
+        # Passed in rather than left to _build_update, so it can be returned.
         updated_at = isotime()
 
-        # Ordering is load-bearing: CancellationReasons come back positionally.
-        # Items 1 and 2 are hand-built ADD-only updates rather than
-        # _build_update ones: bumping the Issue's or the comment's version here
-        # would make attachment traffic fail a concurrent version-fenced
-        # update_issue or update_issue_comment with a spurious
-        # DDBVersionConflictError. Item 0 is a real edit to the attachment
-        # itself, so bumping its version is correct.
+        # CancellationReasons are positional. The counter updates are
+        # hand-built ADDs that do not bump their owner's version; see
+        # issue_num_attachments_update.
         items = [
             {"Update": self._build_update(
                 PK=self.issue_pk(space_id, issue_id),
                 SK=self.attachment_sk(attachment_id),
+                # UPLOADED is terminal, so this condition is also the record
+                # that the counters below already moved: a replayed confirm
+                # fails it and the whole transaction is a no-op, which keeps
+                # the counts exactly-once under at-least-once delivery.
                 expected_vals={"status": AttachmentStatus.PENDING},
-                # The TTL attribute is removed rather than pushed out: a
-                # confirmed attachment must not be reapable at all.
                 remove_attrs=[ATTACHMENT_TTL_ATTR],
                 status=AttachmentStatus.UPLOADED,
                 size=size,
@@ -621,15 +471,11 @@ class AttachmentMixin:
 
             failed, _ = self.failed_reason_item(exc, 1)
             if failed:
-                # The Issue was deleted between initiate and now; its
-                # partition, this row included, is waiting for the sweep.
                 raise DDBMissingError(
                     f"Issue not found: {space_id}#{issue_id}") from exc
 
             failed, _ = self.failed_reason_item(exc, 2)
             if failed:
-                # Likewise for the comment, whose own sweep will remove this
-                # row; see handle_issue_comment_deleted.
                 raise DDBMissingError(
                     "IssueComment not found: "
                     f"{space_id}#{issue_id}#{attachment.comment_id}") from exc
@@ -638,12 +484,9 @@ class AttachmentMixin:
             raise DDBInternalError(
                 f"Error confirming issue attachment: {exc!s}") from exc
 
-        # The row as written, assembled from what was just written rather than
-        # read back: a get_item here would be eventually consistent and could
-        # hand back the pre-write row, and a consistent read would be a second
-        # charge for values this method already knows. Nothing else writes a
-        # PENDING attachment, so the version this write produced is the one it
-        # read plus the bump _build_update applies.
+        # Built from what was written rather than read back, which could return
+        # the pre-write row. Only confirm writes a PENDING row, so the version
+        # is the one read plus _build_update's bump.
         attachment.status = AttachmentStatus.UPLOADED
         attachment.size = size
         attachment.content_type = content_type
@@ -660,11 +503,8 @@ class AttachmentMixin:
     def get_issue_attachment(self, *, space_id, issue_id, attachment_id):
         """Load one IssueAttachment, with a presigned download URL.
 
-        A PENDING attachment comes back as a row with no URL rather than as an
-        error. There is nothing to download, but a caller looking at a stuck
-        upload needs to see it to decide what to do with it: re-sign and finish
-        it, or delete it. Refusing the read would leave a row a caller can
-        neither see nor act on.
+        A PENDING attachment is returned with no URL rather than refused, so a
+        caller can see a stuck upload and re-sign or delete it.
 
         Args:
             space_id (str): id of the issue's space
@@ -698,18 +538,9 @@ class AttachmentMixin:
                               cursor=None, ascending=True):
         """One page of an Issue's IssueAttachments, oldest first by default.
 
-        Sorted by sort key, which is by attachment_id, which is by creation
-        timestamp: see types/issue.py. Covers the Issue's linked and unlinked
-        attachments alike, since both live in this partition; GSI1 is what
-        narrows to one comment's.
-
-        The SK prefix is what keeps the Issue's info, comment and blocker rows
-        out of the result. That is a key condition rather than a filter, so
-        Limit counts only attachment rows.
-
-        PENDING attachments are included. Filtering them out would make a page
-        of `limit` items mean nothing and would hide exactly the rows a caller
-        needs to see to clean up an upload that never finished.
+        Sorted by attachment_id, which is creation order. Includes linked and
+        unlinked attachments, and PENDING ones, so a caller can find uploads
+        that never finished.
 
         Args:
             space_id (str): id of the issue's space
@@ -741,15 +572,9 @@ class AttachmentMixin:
                                       limit=50, cursor=None, ascending=True):
         """One page of the IssueAttachments linked to one IssueComment.
 
-        Read from GSI1, which is the comment link itself. The index is sparse:
-        an attachment with no comment_id has no GSI1 keys at all, so it is not
-        in the index and cannot appear here, rather than being filtered out of
-        a page. See types/issue.py IssueAttachment and BaseObject.serialize for
-        how an absent key attr, not a NULL one, is what makes that so.
-
-        Eventually consistent, as every GSI read is, so an attachment linked
-        moments ago may not be here yet. That is fine for a read a caller
-        drives, and is exactly why neither delete sweep uses this index.
+        Read from GSI1, which only linked attachments are in. Eventually
+        consistent, so an attachment linked moments ago may be missing; the
+        delete sweeps read the partition instead for that reason.
 
         Args:
             space_id (str): id of the issue's space
@@ -785,19 +610,9 @@ class AttachmentMixin:
     # ------------------------------------------------------------------
 
     def delete_issue_attachment(self, *, space_id, issue_id, attachment_id):
-        """Delete an IssueAttachment and uncount it if it was counted.
+        """Delete an IssueAttachment, decrementing its counters if UPLOADED.
 
-        The object follows the row: this write is what the stream turns into an
-        IssueAttachmentDeleted, and handle_issue_attachment_deleted deletes the
-        bytes. Nothing here touches S3.
-
-        Only an UPLOADED attachment decrements, because only an UPLOADED one
-        was ever counted; see confirm_issue_attachment_uploaded. The status
-        comes from a read, so it may already be stale by the time the write
-        runs, which is why every delete this issues is conditioned on the status
-        its decrements were chosen for, and why neither status is ever deleted
-        blind. delete_attachment_with_counters has the argument for that and for
-        why it is the opposite shape to delete_blocker_for_sweep.
+        The S3 object is deleted by handle_issue_attachment_deleted, not here.
 
         Args:
             space_id (str): id of the issue's space
@@ -823,61 +638,29 @@ class AttachmentMixin:
                                         with_comment=True):
         """Delete one IssueAttachment row, decrementing if it was counted.
 
-        The shared half of delete_issue_attachment and the delete sweeps, so a
-        row swept out from under a deleted Issue is uncounted by the same rule
-        as one a caller deletes.
+        Shared by delete_issue_attachment and the delete sweeps.
 
-        Every delete issued from here is conditioned on the status whose
-        decrements it carries, and no rung ever deletes the row blind. That is
-        the whole correctness argument, and it is deliberately the MIRROR IMAGE
-        of IssueMixin.delete_blocker_for_sweep, which this method once copied.
-        There, the writer being raced is handle_issue_done, and it performs the
-        *decrement* itself, so a cancelled condition means the decrement has
-        already happened and falling through to a plain delete loses nothing.
-        Here the writer being raced is confirm_issue_attachment_uploaded, and it
-        performs an *increment*: it moves PENDING -> UPLOADED and adds 1 to each
-        counter in one transaction. Falling through to a plain delete would
-        therefore remove a row that was just counted without ever taking that 1
-        back, and both counters would overcount permanently. No exotic timing is
-        needed to get there: a confirm that commits server-side but times out on
-        the way back leaves a caller that believes it failed and deletes.
+        Every delete is conditioned on the status read, and none is issued
+        blind. This is the opposite of delete_blocker_for_sweep: there the
+        competing writer makes the decrement itself, so falling through to a
+        plain delete is safe. Here the competing writer is confirm, which
+        *increments*, so a blind delete of a row confirmed since the read would
+        leave the counters permanently too high.
 
-        So the attempts are a ladder, each rung conditioned, and only a
-        cancellation naming the Delete itself is read as "another writer got
-        there first":
+        The attempts form a ladder:
 
-        * UPLOADED, with every counter the caller asked for. The row and its
-          counters then move together or not at all.
-        * A cancellation naming a counter's own Update means the row holding that
-          counter is gone: an Issue or an IssueComment deleted in the ordinary
-          SQS window before its own sweep ran. That one counter is dropped and
-          the rest is attempted again, rather than the whole decrement being
-          abandoned. With a linked attachment the items are Delete, Issue -1 and
-          comment -1, so "a counter row is gone" is not "there is no counter left
-          to decrement": losing the comment does not excuse leaving the Issue
-          overcounting. handle_issue_comment_deleted passes with_comment=False
-          for exactly this asymmetry when it knows in advance; this is the same
-          thing found out from the cancellation instead.
-        * A cancellation naming the Delete, for a row read as UPLOADED, can only
-          mean the row is already gone, since status never moves back from
-          UPLOADED. Whoever removed it owed the same decrements and made them.
-        * PENDING, when that is what the read said, conditioned on that status
-          and carrying no decrement, because a PENDING row was never counted.
-        * If that condition is refused while the row still exists, the row was
-          confirmed under us between the read and the write. It is re-read and
-          the ladder is climbed again, arriving on the UPLOADED rung with the
-          counters it now owes.
+        * UPLOADED: delete with every requested decrement. If a counter's own
+          Update is refused, that counter's row is gone; drop just that counter
+          and retry, since a missing comment is no excuse to leave the Issue
+          overcounting. If the Delete is refused, the row is already gone and
+          whoever removed it made the decrements.
+        * PENDING: delete with no decrement. If refused, re-read: a missing row
+          is done, and a row confirmed since the read goes round again as
+          UPLOADED.
 
-        Bounded, not looped until it works: ATTACHMENT_DELETE_ATTEMPTS is the
-        exact worst case, since the status moves one way only and each counter
-        can be dropped at most once. Exhausting it means one of the assumptions
-        above is wrong, and that is reported rather than papered over by
-        deleting the row blind, which is how the counter drift got in.
-
-        with_issue and with_comment are passed through to
-        attachment_counter_updates, for a caller that already knows one of the
-        parent rows is gone; IssueMixin.handle_issue_deleted runs with the
-        Issue's info row already deleted.
+        ATTACHMENT_DELETE_ATTEMPTS bounds the ladder exactly; running out means
+        an assumption above is wrong, and is reported rather than resolved by a
+        blind delete.
 
         Args:
             attachment (IssueAttachment): the row to delete
@@ -892,9 +675,7 @@ class AttachmentMixin:
         """
         for _attempt in range(ATTACHMENT_DELETE_ATTEMPTS):
             if attachment.is_uploaded:
-                # Paired with their names so a cancelled index can be traced
-                # back to the counter it belongs to; the Delete is item 0, so
-                # the counters start at 1.
+                # The Delete is item 0, so counters start at index 1.
                 counters = self.attachment_counter_updates(
                     attachment, -1, with_issue=with_issue,
                     with_comment=with_comment)
@@ -905,8 +686,6 @@ class AttachmentMixin:
                     "Error deleting issue attachment")
 
                 if applied or failed_index == 0:
-                    # Applied, or the Delete itself was refused, which for a row
-                    # read as UPLOADED means it is already gone.
                     return
 
                 if counters[failed_index - 1][0] == "issue":
@@ -923,11 +702,6 @@ class AttachmentMixin:
             if applied:
                 return
 
-            # One item, one condition, two ways for it to fail: the row is gone,
-            # in which case another writer removed it and owed nothing, or it is
-            # no longer PENDING, which can only mean confirm landed since the
-            # read and both counters now stand against it. The re-read is what
-            # tells those apart, and DDBMissingError is the first of them.
             try:
                 attachment = self.get_primary_item(
                     PK=self.issue_pk(attachment.space_id, attachment.issue_id),
@@ -948,14 +722,7 @@ class AttachmentMixin:
             f"#{attachment.attachment_id}")
 
     def uploaded_attachment_delete(self, attachment):
-        """Delete dict for an IssueAttachment that must still be UPLOADED.
-
-        Carries the decrements' precondition: the row was counted, so it may
-        only be removed together with the counter updates beside it in the
-        transaction. Paired with pending_attachment_delete, and between them
-        every status an attachment can be in has a conditioned delete, which is
-        what keeps delete_attachment_with_counters from ever deleting blind.
-        """
+        """Delete dict for an IssueAttachment that must still be UPLOADED."""
         return {
             "TableName": self.table_name,
             "Key": self.attachment_key(attachment.space_id,
@@ -973,19 +740,8 @@ class AttachmentMixin:
     def pending_attachment_delete(self, attachment):
         """Delete dict for an IssueAttachment that must still be PENDING.
 
-        The twin of uploaded_attachment_delete, for the delete that carries no
-        decrement because the row was never counted. The condition is what makes
-        that uncounted delete safe: confirm_issue_attachment_uploaded increments
-        both counters as it moves the status, so an unconditioned delete here
-        would remove a row that had just been counted and leave the increment
-        standing. Refusing instead hands the caller the chance to notice; see
-        delete_attachment_with_counters.
-
-        Not the same thing as DynamoDB's TTL reaping a PENDING row, which is an
-        unconditioned delete PL8 does not issue and cannot condition. That is
-        safe for the same reason this condition tests: the TTL attribute is
-        removed by confirm in the same transaction as the increment, so a row
-        that was counted is no longer reapable.
+        TTL expiry deletes PENDING rows unconditionally, which is safe because
+        confirm removes the expiry in the same transaction as the increment.
         """
         return {
             "TableName": self.table_name,
@@ -1003,19 +759,10 @@ class AttachmentMixin:
 
     def attachment_counter_updates(self, attachment, delta, *,
                                    with_issue=True, with_comment=True):
-        """The counter updates one attachment's status change must carry.
+        """The counter updates for one attachment being counted or uncounted.
 
-        An UPLOADED attachment is counted on its Issue, and on its IssueComment
-        too when it is linked, so the two move together or not at all. Which
-        counters those are lives here, so the delete paths cannot disagree about
-        it; confirm_issue_attachment_uploaded builds its own item list, because
-        it reads each cancelled index back as its own error, but it moves exactly
-        this set with delta 1.
-
-        with_issue and with_comment let a caller leave out a counter whose row
-        it already knows is gone: the Issue delete sweep runs with the info row
-        deleted, so including it would fail the transaction's condition every
-        time and cost the sweep an attempt it already knows the answer to.
+        The Issue's num_attachments, plus the comment's when linked. with_issue
+        and with_comment leave out a counter whose row the caller knows is gone.
 
         Args:
             attachment (IssueAttachment): the attachment being counted
@@ -1025,12 +772,8 @@ class AttachmentMixin:
 
         Returns:
             list[tuple]: (name, entry) pairs in transaction order, where entry is
-                a transact_write_items entry and name is "issue" or "comment".
-                Paired rather than bare, because a cancelled transaction reports
-                only the position that failed: the name is how
-                delete_attachment_with_counters gets from that position back to
-                the counter whose row is gone, without a second copy of the
-                rules for which counters are included.
+                a transact_write_items entry and name is "issue" or "comment",
+                so a cancelled index can be traced back to its counter
         """
         updates = []
 
@@ -1056,59 +799,16 @@ class AttachmentMixin:
 
         Triggered by an SQS event; see the IssueMixin docstring for the path.
 
-        A linked IssueAttachment MUST NOT outlive its comment, so the comment's
-        attachments go with it.
+        Deletes the comment's linked attachments, decrementing the Issue's
+        num_attachments but not the comment's, whose counter went with its row.
+        Reads the Issue's partition rather than GSI1, which is eventually
+        consistent and could miss a recent link.
 
-        The comment's own num_attachments is not moved: that counter is on the
-        row that is already gone. The Issue's is, because the Issue is still
-        there and the rows being deleted were counted against it, so leaving it
-        alone would make it permanently overcount its attachments. Each row
-        therefore goes through delete_attachment_with_counters, with the
-        comment's counter left out and the decrement conditioned on the row
-        still being UPLOADED, which is what keeps this idempotent: a replayed or
-        late event finds the rows gone, or finds one and has its Delete refused,
-        and a refused Delete is the one cancellation that means another writer
-        already removed the row and made its decrements. Nothing falls through to
-        an unconditioned delete, which is what would let this sweep remove a row
-        a concurrent confirm had just counted and leave the Issue overcounting;
-        see delete_attachment_with_counters.
-
-        Reads the Issue's partition rather than GSI1, deliberately, and for the
-        same reason handle_issue_deleted's Phase 2 comment gives: the index is
-        eventually consistent, an attachment linked moments before the delete
-        may not be in it yet, and nothing retries this sweep, so a row missing
-        from an eventually-consistent page is a row that outlives its comment
-        for good. The partition read is consistent and the set is closed by the
-        time it runs, since an attachment cannot be linked to a comment that is
-        gone.
-
-        Needs no "is a live comment standing here" guard, unlike
-        handle_issue_deleted. That guard exists because an issue_id is 6
-        characters drawn from 62 and a new Issue can take a deleted one's id
-        within seconds, making its rows indistinguishable from the dead Issue's.
-        A comment_id is a UUIDv7, so a new comment effectively never takes a
-        deleted one's id, and an attachment found linked to this comment_id can
-        only be one of the deleted comment's own.
-
-        That argument covers the rows, but not the Issue's counter, and the
-        difference is worth stating rather than leaving to be discovered. The
-        partition this reads is addressed by issue_id, not by comment_id, so
-        inside the id-collision window handle_issue_deleted documents and accepts
-        this sweep can be reading a NEW Issue's partition: the old Issue's delete
-        found a live info row standing in it, left its rows stranded, and this
-        event then arrives for a comment of the old Issue. The attachment rows it
-        finds are unambiguously the dead comment's, so deleting them is right and
-        is in fact the only thing that ever cleans them up. The decrement is not:
-        num_attachments now belongs to the new Issue, which never counted those
-        attachments, so this can drive its counter down and even negative.
-
-        Accepted, not guarded, for the same reason the stranding itself is
-        accepted: reaching it needs a fresh issue_id to collide with this one, in
-        the same Space, in the seconds between the two events. A guard here would
-        have to distinguish a stranded row from a live one, which is precisely
-        what handle_issue_deleted cannot do either. Anything that makes issue_id
-        collisions worth defending against has to fix them at the source, not one
-        sweep at a time.
+        Known limitation: if the Issue was deleted and its issue_id reused
+        before this event arrives, the decrements land on the new Issue and can
+        drive its counter negative. Accepted along with the stranded rows
+        handle_issue_deleted already accepts in that window; the fix belongs in
+        issue_id generation, not here.
 
         Args:
             space_id (str): id of the issue's space
@@ -1124,11 +824,8 @@ class AttachmentMixin:
 
         for item in self.paginate(self.get_issue_partition, space_id=space_id,
                                   issue_id=issue_id):
-            # Only the attachments, and only this comment's. Everything else in
-            # the partition belongs to the Issue, which is still there: the
-            # comment was deleted, not the Issue. Matched positively rather
-            # than by excluding known types, so a row type added later is
-            # skipped rather than swept.
+            # Matched positively, so a row type added later is skipped rather
+            # than swept.
             if (isinstance(item, IssueAttachment)
                     and item.comment_id == comment_id):
                 self.delete_attachment_with_counters(item, with_comment=False)
@@ -1139,38 +836,13 @@ class AttachmentMixin:
 
         Triggered by an SQS event; see the IssueMixin docstring for the path.
 
-        Deletes the S3 object, so the bytes never outlive the row that named
-        them. Every path that removes a row reaches this one: a caller's
-        delete, either delete sweep, and DynamoDB's TTL reaping a PENDING
-        upload, which is why the object is deleted from here rather than
-        alongside each of those writes.
+        Deletes the S3 object. Every way a row is removed, including TTL
+        expiry, reaches here, which is why objects are deleted here and nowhere
+        else. DeleteObject succeeds whether or not the key exists, so this is
+        idempotent.
 
-        Naturally idempotent, with no condition to arrange: DeleteObject
-        answers 204 whether the key was there or not, so a replayed event, and a
-        PENDING row whose upload never happened, are both a no-op. The bucket is
-        versioned, with noncurrent versions expiring after 7 days, which does not
-        change that: a repeated delete of a key already deleted writes another
-        delete marker rather than failing, and that marker is itself a noncurrent
-        version the 7-day rule clears. See pl8-docs
-        architecture/backend/storage.md, which also has what versioning does
-        change: the bytes are billed, and are recoverable by an operator, for
-        those 7 days.
-
-        The key is recomputed from the ids rather than carried in the event. The
-        event names the attachment, and where its bytes live is this library's
-        business; an event carrying the key would let a stale or hand-made event
-        name any object in the bucket for deletion.
-
-        The ids that replace it are not taken on trust either, or the exposure
-        would only have moved: space_id is validated as it is on every method
-        here, and attachment_id is validated as a UUIDv7, the same check
-        validate_comment_id makes for the same reason. Both ends of
-        S3_KEY_FORMAT are therefore known not to carry a separator of their own,
-        so the result always has the shape of a key PL8 itself would have signed
-        rather than an arbitrary name. issue_id is the exception, and honestly
-        so: no handler in this library validates one, and the event still chooses
-        which Issue's prefix inside the bucket the key lands under. What it
-        cannot do is name an object that is not an attachment.
+        The key is rebuilt from validated ids rather than taken from the event,
+        so an event cannot name an object that is not an attachment.
 
         Args:
             space_id (str): id of the issue's space
@@ -1191,8 +863,8 @@ class AttachmentMixin:
         try:
             self.s3_client.delete_object(Bucket=self.bucket_name, Key=key)
         except ClientError as exc:
-            # Nothing is swallowed here: a delete that failed leaves bytes
-            # behind, and the event must be retried or land in the DLQ.
+            # Raised rather than swallowed, so the event is retried or lands
+            # in the DLQ instead of leaving the bytes behind.
             self.log_client_error(exc)
             raise StorageInternalError(
                 f"Error deleting attachment object: {exc!s}") from exc

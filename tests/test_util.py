@@ -722,9 +722,7 @@ class TestValidateContentType:
         "application/pdf/extra",
         "application pdf",
         "application/pdf\n",
-        # Parameters are refused on purpose: the type is signed into the policy
-        # as an exact condition, so a caller sending a parameterized type
-        # against a policy signed without one would be refused by S3 instead.
+        # Parameters are refused on purpose; see CONTENT_TYPE_PATTERN.
         "text/plain; charset=utf-8",
     ])
     def test_rejects_anything_that_is_not_type_subtype(self, content_type):

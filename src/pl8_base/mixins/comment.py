@@ -19,16 +19,12 @@ from ..util import (
 
 COMMENT_SK_PREFIX = "500#COMMENT#"
 
-# Upper bound of the comment group in an Issue's partition, for the sort key
-# range get_issue_comments_after builds. "$" is the character after "#", so
-# incrementing the prefix's own final character gives a key that sorts above
-# every 500#COMMENT#<id> and below anything numbered higher. Derived from the
-# prefix rather than spelled out, so the bound cannot drift away from the keys
-# it is bounding.
+# Upper bound of the comment group in an Issue's partition: "$" sorts just
+# after "#", so this is above every comment key and below the next group.
 COMMENT_SK_GROUP_END = COMMENT_SK_PREFIX[:-1] + "$"
 
-# Lowest code point there is, appended to a sort key to make an inclusive bound
-# exclusive: nothing sorts between a key and that key plus a NUL.
+# Appended to a sort key to make an inclusive bound exclusive: nothing sorts
+# between a key and that key plus a NUL.
 SK_EXCLUSIVE_SUFFIX = "\u0000"
 
 
@@ -39,9 +35,8 @@ class CommentMixin:
     carries it. comment_id is a UUIDv7 and created_at is read back out of it,
     which is what makes sort key order creation order; see types/issue.py.
 
-    A comment MAY also have IssueAttachments linked to it, which it counts in
-    num_attachments; those rows and that counter are AttachmentMixin's, and
-    deleting a comment sweeps them through handle_issue_comment_deleted.
+    A comment's linked IssueAttachments and its num_attachments are
+    AttachmentMixin's.
 
     create_issue_comment and delete_issue_comment keep the Issue's num_comments
     in step, in the same transaction as the comment write. That is what refuses
@@ -165,11 +160,8 @@ class CommentMixin:
         timestamp: see types/issue.py. Nothing sorts on an updated timestamp, so
         editing a comment does not move it in the thread.
 
-        Oldest first is the default rather than the invariant it once was:
-        ascending=False reads the thread newest first, which is what a caller
-        showing the latest activity on a long thread wants, and what lets it
-        page from the end without walking the whole thread. Only the direction
-        changes; the ordering is still by comment_id either way.
+        ascending=False reads newest first, so a caller can page from the end
+        of a long thread.
 
         The SK prefix is what keeps the Issue's own info, attachment and blocker
         rows out of the result. That is a key condition rather than a filter, so
@@ -208,39 +200,12 @@ class CommentMixin:
         For a caller syncing a thread it has already partly read: it holds the
         id of the last comment it saw and wants what has been written since.
 
-        Always ascending, with no direction to choose, unlike
-        get_issue_comments above: "after" has only one sensible order, since the
-        caller is extending a thread it already holds from the point it
-        stopped. Reading that range backwards would hand it the newest comment
-        first and leave it to reverse the page itself.
+        Always ascending: the caller is extending a thread it already holds.
 
-        The range is a BETWEEN on the sort key:
-
-            :start  500#COMMENT#<last_comment_id>\u0000
-            :end    500#COMMENT$
-
-        BETWEEN is inclusive at both ends, so the start bound carries a NUL to
-        push it just past the named comment's own key and exclude it; nothing
-        sorts between a key and that key plus a NUL. With no last_comment_id
-        the start is the bare prefix, which is below every comment key, so the
-        whole thread comes back.
-
-        The upper bound is the subtle half, and it is needed at all because
-        DynamoDB permits exactly one sort key range condition: `>` cannot be
-        combined with a begins_with to keep the range inside the comment group,
-        so the range has to bound itself. An unbounded `>` would run straight
-        past the comments into the other row types sharing the partition, and a
-        "new comments" call would hand back parsed IssueAttachments and
-        IssueBlockers.
-
-        COMMENT_SK_GROUP_END is that bound, and it is derived from the comment
-        prefix alone: "$" is the character after "#", so "500#COMMENT$" sorts
-        above every 500#COMMENT#<id> key and below any key with a higher group
-        number. It is the end of the comment group, not the start of whatever
-        happens to sit above it, so nothing here has to be revisited when a row
-        type is added to or removed from the partition; the numeric group
-        prefixes are what make that true. See dchenstealth/docs
-        guidelines/dynamodb_keys.md.
+        A BETWEEN rather than a `>`, because DynamoDB allows only one sort key
+        condition and an unbounded `>` would run past the comments into the
+        other rows in the partition. The start excludes the named comment
+        itself; see SK_EXCLUSIVE_SUFFIX and COMMENT_SK_GROUP_END.
 
         Args:
             space_id (str): id of the issue's space
@@ -264,8 +229,7 @@ class CommentMixin:
         if last_comment_id is None:
             start = COMMENT_SK_PREFIX
         else:
-            # It composes a sort key bound, so an id carrying a "#" or a
-            # newline would move the range rather than fail to match in it.
+            # It composes a key bound, so a malformed id would move the range.
             validate_comment_id(last_comment_id)
             start = (f"{COMMENT_SK_PREFIX}{last_comment_id}"
                      f"{SK_EXCLUSIVE_SUFFIX}")

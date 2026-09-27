@@ -42,18 +42,14 @@ DEFAULT_ID_ALPHABET = string.ascii_letters + string.digits
 # every key format string is built on.
 SPACE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 
-# Characters an attachment name MUST NOT contain: the C0 controls, DEL, and the
-# two characters that would break out of a quoted HTTP header value. See
-# validate_attachment_name; everything else, spaces and non-ASCII included, is
-# allowed, since a name is a label on the row and never part of a key.
+# Characters an attachment name MUST NOT contain; see validate_attachment_name.
 ATTACHMENT_NAME_FORBIDDEN = re.compile(r'[\x00-\x1f\x7f"\\]')
 
 # A media type, as "type/subtype" in RFC 9110 token characters. Parameters are
-# deliberately not accepted: the type is signed into the presigned POST policy
-# as an exact Content-Type condition, so a caller sending
-# "text/plain; charset=utf-8" against a policy signed for "text/plain" would
-# have its upload refused by S3 rather than by anything here, which is a far
-# worse error to debug. See validate_content_type.
+# not accepted: PL8 records what kind of file an attachment is, not how it is
+# encoded, and nothing has needed more. Nothing downstream depends on their
+# absence, so the pattern can widen if something does. See
+# validate_content_type.
 CONTENT_TYPE_PATTERN = re.compile(
     r"[A-Za-z0-9!#$%&'*+.^_`|~-]+/[A-Za-z0-9!#$%&'*+.^_`|~-]+")
 
@@ -245,17 +241,9 @@ def validate_comment_id(comment_id):
     """
     Validate a comment id.
 
-    A comment id composes a sort key twice over: 500#COMMENT#{comment_id} for
-    the comment row itself, and the COMMENTATTACHMENT#... GSI1 partition an
-    IssueAttachment is linked under. get_issue_comments_after also builds a sort
-    key range out of one. So an id carrying a "#", or a newline, would move the
-    key it composes rather than fail to match it.
-
-    Defers the whole check to isotime_from_uuid7, which already raises
-    DDBArgsError for anything that is not a UUIDv7, rather than adding a second
-    definition of what a comment id is: PL8 mints comment ids as UUIDv7s and
-    reads their creation timestamps back out of them, so "is a UUIDv7" is the
-    rule, and the characters a UUID can be spelled with are a consequence of it.
+    A comment id composes keys, so a "#" or a newline in one would move the
+    key rather than fail to match. Valid means a UUIDv7, which
+    isotime_from_uuid7 already checks.
 
     Args:
         comment_id (str): id to validate
@@ -270,25 +258,9 @@ def validate_attachment_id(attachment_id):
     """
     Validate an attachment id.
 
-    The same rule as validate_comment_id, one entity along, and for one caller:
-    AttachmentMixin.handle_issue_attachment_deleted, which recomputes an S3 key
-    from the ids an event carries rather than trusting a key in the payload.
-    That is only worth anything if the ids cannot compose a key of their own
-    choosing, so the id that goes into IssueAttachment.S3_KEY_FORMAT is checked
-    here first: without it, a hand-made or stale event could put a "/" or a ".."
-    in attachment_id and name something other than an attachment object.
-
-    Not called by the methods a caller reaches an attachment_id through, such as
-    get_issue_attachment or delete_issue_attachment. There an id that is not one
-    PL8 minted composes a sort key that simply matches nothing, and the caller
-    gets DDBMissingError, which is the right answer to "delete this attachment
-    that does not exist". The event handler is different because no row lookup
-    stands between the id and the effect.
-
-    Defers the whole check to isotime_from_uuid7, for the reason
-    validate_comment_id gives: PL8 mints attachment ids as UUIDv7s and reads
-    their creation timestamps back out of them, so "is a UUIDv7" is the rule and
-    the characters one can be spelled with follow from it.
+    Used by handle_issue_attachment_deleted, which builds an S3 key from an
+    event's ids with no row lookup in between, so a "/" or ".." could name
+    another object. Elsewhere a bad id simply matches no row.
 
     Args:
         attachment_id (str): id to validate
@@ -303,18 +275,10 @@ def validate_attachment_name(name):
     """
     Validate a caller-supplied attachment name.
 
-    The name is the human-readable filename, and it is deliberately not part of
-    the S3 key; see types/issue.py IssueAttachment.S3_KEY_FORMAT. It reaches the
-    downloader through the ResponseContentDisposition of a presigned GET, as
-    `attachment; filename="<name>"`, and that header value is *signed into* the
-    URL. A `"` would close the quoted string early and a control character, a
-    newline in particular, would end the header line, so either one is an
-    injection into a signed header the caller does not otherwise control. A
-    backslash is refused for the same reason: in a quoted string it escapes the
-    next character, so a name ending in one escapes the closing quote.
-
-    Otherwise unconstrained: spaces, punctuation and non-ASCII are all fine in
-    a filename, and unlike a space_id the name never composes a key.
+    The name is interpolated into a quoted Content-Disposition header on
+    download, so control characters, quotes and backslashes are refused:
+    each could break out of it. Anything else is allowed, since a name never
+    composes a key.
 
     Args:
         name (str): name to validate
@@ -340,15 +304,9 @@ def validate_content_type(content_type):
     """
     Validate a caller-supplied attachment content type.
 
-    The content type is signed into the presigned POST twice, as a policy
-    condition and as a field, so S3 refuses an upload that declares anything
-    else. That makes it worth checking here: a value that is not a media type
-    at all would still be signed, and the upload would fail at S3 with the
-    caller holding a URL it can never use.
-
-    Checked as a shape rather than against a list of known types. PL8 attaches
-    whatever a caller attaches and has no opinion on the format, so an
-    allowlist would only mean rejecting next year's media types.
+    Stored on the S3 object and served as every download's Content-Type, so
+    it must be a well-formed media type. Checked as a shape rather than
+    against a list, so new media types are not refused.
 
     Args:
         content_type (str): content type to validate
@@ -376,19 +334,7 @@ def validate_attachment_size(size):
     """
     Validate a caller-supplied attachment size in bytes.
 
-    The size is declared before the bytes exist, because it becomes an exact
-    content-length-range condition in the presigned POST policy: S3 then
-    refuses a body of any other length, which is what stops a caller declaring
-    one byte and uploading a gigabyte. So this bound is enforced at signing
-    time, on a number, rather than by measuring anything.
-
-    Zero is refused along with the negatives. An empty object is representable
-    in S3, but an attachment of nothing is a caller bug far more often than an
-    intent, and a zero-length range condition is an awkward thing to have
-    signed.
-
-    A bool is refused even though it is an int in Python: True would otherwise
-    be a legal size of one byte.
+    Zero is refused: an empty attachment is almost always a caller bug.
 
     Args:
         size (int): size in bytes
@@ -397,6 +343,7 @@ def validate_attachment_size(size):
         DDBArgsError: if size is not an int, or is outside
             1..MAX_ATTACHMENT_SIZE_BYTES
     """
+    # bool is an int subclass, and True would otherwise be a size of 1.
     if isinstance(size, bool) or not isinstance(size, int):
         raise DDBArgsError("Attachment size must be an integer")
 
